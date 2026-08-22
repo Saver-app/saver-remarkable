@@ -84,8 +84,5 @@ capture() {
 	}
 }
 
-# TODO before submitting: tag v0.1.0 on Saver-app/saver-remarkable, download
-# the resulting tarball, then run scripts/update-checksums.sh saver-remarkable
-# in a vellum-dev/vellum checkout to replace this.
-sha512sums='0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+sha512sums='154f9fad58a5aaa4357727aeb4a26aea11c9428318df7cc9d631f933e2558fa07edfbcda8653044d16f47b9ca12bb42a8171dfda114bfd3dc434bc2d2d05daf6
 saver-remarkable-0.1.0.tar.gz'
