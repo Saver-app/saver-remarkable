@@ -1,0 +1,660 @@
+
+AFFECT /qml/common/SceneSelectionHandler.qml
+    TRAVERSE Item > SelectionContextualMenu#tools
+        LOCATE AFTER ArkControls.ContextualMenu.Button#convertToText
+        INSERT {
+        ArkControls.ContextualMenu.Button {
+            id: saverSend
+            focusPolicy: Qt.NoFocus
+            visible: controller && saverSend.likelyHasStroke()
+            type: tools.type
+            iconSource: "qrc:/ark/icons/checkmark_circle"
+
+            property bool armed: false
+
+            property var pendingRequest: null
+
+            Timer {
+                id: saverRequestWatchdog
+                interval: 20000
+                repeat: false
+                onTriggered: {
+                    if (saverSend.pendingRequest) {
+                        saverSend.pendingRequest.abort();
+                        saverSend.pendingRequest = null;
+                    }
+                }
+            }
+
+            Timer {
+                id: saverConvertWatchdog
+                interval: 45000
+                repeat: false
+                onTriggered: {
+                    if (saverSend.armed) {
+                        saverSend.armed = false;
+                        saverToast.show("Handwriting conversion timed out - check your Wi-Fi", false);
+                    }
+                }
+            }
+
+            function trackRequest(request) {
+                saverSend.pendingRequest = request;
+                saverRequestWatchdog.restart();
+            }
+
+            function finishRequest() {
+                saverSend.pendingRequest = null;
+                saverRequestWatchdog.stop();
+            }
+
+            readonly property string apiUrl: "https://api.saver-app.com/remarkable"
+            readonly property string configPath: "file:///home/root/.config/saver-remarkable/config.toml"
+
+            onClicked: {
+                if (!controller) {
+                    return;
+                }
+                saverSend.armed = true;
+                saverConvertWatchdog.restart();
+                saverToast.show("Converting handwriting...", true);
+                Recognizer.startSelectionToolJob(
+                    controller.cloneSelectedItems(controller.currentLayer, saverSend.cloneScale()),
+                    Settings.handwritingConversionLanguage);
+            }
+
+            function likelyHasStroke() {
+                if (!controller) {
+                    return false;
+                }
+                if (typeof controller.selectionContainsStroke !== "undefined") {
+                    return controller.selectionContainsStroke;
+                }
+                return true;
+            }
+
+            function cloneScale() {
+                if (typeof sceneView !== "undefined" && sceneView && sceneView.defaultScale > 0) {
+                    return sceneView.defaultScale;
+                }
+                return 1;
+            }
+
+            Connections {
+                target: Recognizer.selectionToolJob
+                enabled: saverSend.armed
+
+                function onStatusChanged() {
+                    var job = Recognizer.selectionToolJob;
+                    if (!job) {
+                        return;
+                    }
+                    if (job.status === RecognitionJob.Status.Done) {
+                        saverSend.armed = false;
+                        saverConvertWatchdog.stop();
+                        saverSend.beginFlow(job.plainText);
+                    } else if (job.status === RecognitionJob.Status.Error) {
+                        saverSend.armed = false;
+                        saverConvertWatchdog.stop();
+                        saverToast.show(saverSend.errorMessage(job.error), false);
+                        console.log("SAVER: conversion failed, error =", job.error);
+                    }
+                }
+            }
+
+            function errorMessage(code) {
+                if (code === RecognitionJob.ConvertError.AuthenticationError) {
+                    return "Sign in to reMarkable to convert handwriting";
+                }
+                if (code === RecognitionJob.ConvertError.NetworkError) {
+                    return "No connection - conversion needs Wi-Fi";
+                }
+                if (code === RecognitionJob.ConvertError.NoText) {
+                    return "No handwriting recognised";
+                }
+                return "Handwriting conversion failed";
+            }
+
+            function valueFromConfig(body, key) {
+                var quote = String.fromCharCode(34);
+                var lines = (body || "").split("\n");
+                for (var i = 0; i < lines.length; i++) {
+                    var line = lines[i].trim();
+                    if (line.indexOf(key) !== 0) {
+                        continue;
+                    }
+                    var rest = line.substring(key.length).trim();
+                    if (rest.charAt(0) !== "=") {
+                        continue;
+                    }
+                    var value = rest.substring(1).trim();
+                    if (value.length >= 2 && value.charAt(0) === quote
+                        && value.charAt(value.length - 1) === quote) {
+                        value = value.substring(1, value.length - 1);
+                    }
+                    return value;
+                }
+                return "";
+            }
+
+            function readConfig(onDone) {
+                var cfg = new XMLHttpRequest();
+                cfg.onreadystatechange = function () {
+                    if (cfg.readyState !== XMLHttpRequest.DONE) {
+                        return;
+                    }
+                    var body = cfg.responseText;
+                    var token = saverSend.valueFromConfig(body, "device_token");
+                    var confirmValue = saverSend.valueFromConfig(body, "confirm_notebook_todos");
+                    var defaultSpaceId = saverSend.valueFromConfig(body, "notebook_default_space_id");
+                    var defaultSpaceName = saverSend.valueFromConfig(body, "notebook_default_space_name");
+                    var defaultListId = defaultSpaceId.length > 0
+                        ? saverSend.valueFromConfig(body, "notebook_default_list_id") : "";
+                    var defaultListName = defaultSpaceId.length > 0
+                        ? saverSend.valueFromConfig(body, "notebook_default_list_name") : "";
+                    onDone({
+                        token: token,
+                        confirmFirst: confirmValue !== "false",
+                        defaultSpaceId: defaultSpaceId,
+                        defaultSpaceName: defaultSpaceName,
+                        defaultListId: defaultListId,
+                        defaultListName: defaultListName,
+                    });
+                };
+                cfg.open("GET", saverSend.configPath);
+                cfg.send();
+            }
+
+            function beginFlow(text) {
+                var trimmed = (text || "").trim();
+                if (trimmed.length === 0) {
+                    saverToast.show("No handwriting recognised", false);
+                    return;
+                }
+
+                saverSend.readConfig(function (config) {
+                    if (config.token.length === 0) {
+                        saverToast.show("Link the tablet in the Saver app first", false);
+                        console.log("SAVER: no device token in config");
+                        return;
+                    }
+                    if (!config.confirmFirst) {
+                        saverToast.show("Saving " + saverToast.shorten(trimmed) + "...", true);
+                        saverSend.postTodo(config.token, trimmed,
+                                           config.defaultSpaceId, config.defaultListId);
+                        return;
+                    }
+                    saverToast.show("Loading your spaces...", true);
+                    saverSend.fetchPickerOptions(config.token, trimmed,
+                                                 config.defaultSpaceId, config.defaultListId);
+                });
+            }
+
+            function fetchPickerOptions(token, text, defaultSpaceId, defaultListId) {
+                var list = new XMLHttpRequest();
+                list.onreadystatechange = function () {
+                    if (list.readyState !== XMLHttpRequest.DONE) {
+                        return;
+                    }
+                    saverSend.finishRequest();
+                    if (list.status !== 200) {
+                        console.log("SAVER: listPickerOptions ->", list.status, list.responseText);
+                        saverToast.show("Could not load spaces - saving to your active space", true);
+                        saverSend.postTodo(token, text, defaultSpaceId, defaultListId);
+                        return;
+                    }
+                    var parsed = JSON.parse(list.responseText);
+                    saverToast.show("", false);
+                    saverConfirm.openFor(text, parsed.spaces || [], parsed.activeSpaceId || "",
+                                         token, defaultSpaceId, defaultListId);
+                };
+                list.open("POST", saverSend.apiUrl);
+                list.setRequestHeader("Content-Type", "application/json");
+                list.setRequestHeader("Authorization", "Bearer " + token);
+                saverSend.trackRequest(list);
+                list.send(JSON.stringify({ op: "listPickerOptions" }));
+            }
+
+            function postTodo(token, text, spaceId, parentId) {
+                var body = { op: "createTodoFromNotebook", text: text };
+                if (spaceId.length > 0) {
+                    body.spaceId = spaceId;
+                }
+                if (parentId.length > 0) {
+                    body.parentId = parentId;
+                }
+
+                var post = new XMLHttpRequest();
+                post.onreadystatechange = function () {
+                    if (post.readyState !== XMLHttpRequest.DONE) {
+                        return;
+                    }
+                    saverSend.finishRequest();
+                    console.log("SAVER: createTodoFromNotebook ->", post.status, post.responseText);
+                    if (post.status === 200) {
+                        saverToast.show("Added to Saver: " + saverToast.shorten(text), false);
+                    } else if (post.status === 0) {
+                        saverToast.show("Could not reach Saver - check Wi-Fi", false);
+                    } else {
+                        saverToast.show("Saver rejected it (" + post.status + ")", false);
+                    }
+                };
+                post.open("POST", saverSend.apiUrl);
+                post.setRequestHeader("Content-Type", "application/json");
+                post.setRequestHeader("Authorization", "Bearer " + token);
+                saverSend.trackRequest(post);
+                post.send(JSON.stringify(body));
+            }
+        }
+        }
+    END TRAVERSE
+
+    TRAVERSE Item
+        LOCATE AFTER SelectionContextualMenu#tools
+        INSERT {
+        Rectangle {
+            id: saverToast
+
+            property string message: ""
+
+            z: 200
+            visible: saverToast.message.length > 0
+            anchors.top: parent.top
+            anchors.topMargin: 40
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: Math.min(parent.width - 80, saverToastLabel.implicitWidth + 56)
+            height: saverToastLabel.implicitHeight + 36
+            color: "white"
+            border.color: "black"
+            border.width: 3
+            radius: 8
+            antialiasing: false
+
+            Text {
+                id: saverToastLabel
+                anchors.centerIn: parent
+                width: Math.min(implicitWidth, saverToast.parent.width - 136)
+                text: saverToast.message
+                font.pixelSize: 30
+                color: "black"
+                elide: Text.ElideRight
+                horizontalAlignment: Text.AlignHCenter
+            }
+
+            Timer {
+                id: saverToastTimer
+                interval: 4000
+                repeat: false
+                onTriggered: saverToast.message = ""
+            }
+
+            function show(text, sticky) {
+                saverToast.message = text;
+                saverToastTimer.stop();
+                if (text.length > 0 && !sticky) {
+                    saverToastTimer.restart();
+                }
+            }
+
+            function shorten(text) {
+                var quote = String.fromCharCode(34);
+                var flat = text.replace("\n", " ").trim();
+                if (flat.length > 38) {
+                    flat = flat.substring(0, 38) + "...";
+                }
+                return quote + flat + quote;
+            }
+        }
+
+        Rectangle {
+            id: saverConfirm
+
+            property string token: ""
+            property string text: ""
+            property var spaces: []
+            property string spaceId: ""
+            property string spaceName: ""
+            property string listId: ""
+            property string listName: "No list"
+            property string picking: ""
+
+            z: 300
+            visible: false
+            anchors.centerIn: parent
+            width: Math.min(parent.width - 160, 820)
+            height: Math.min(parent.height - 160, 760)
+            color: "white"
+            border.color: "black"
+            border.width: 3
+            radius: 10
+            antialiasing: false
+
+            MouseArea { anchors.fill: parent }
+
+            function findSpace(id) {
+                for (var i = 0; i < saverConfirm.spaces.length; i++) {
+                    if (saverConfirm.spaces[i].id === id) {
+                        return saverConfirm.spaces[i];
+                    }
+                }
+                return null;
+            }
+
+            function currentLists() {
+                var space = saverConfirm.findSpace(saverConfirm.spaceId);
+                return (space && space.lists) ? space.lists : [];
+            }
+
+            function openFor(initialText, spaceList, activeSpaceId, authToken,
+                             defaultSpaceId, defaultListId) {
+                saverConfirm.token = authToken;
+                saverConfirm.text = initialText;
+                saverConfirm.spaces = spaceList;
+                saverConfirm.picking = "";
+
+                var preferredId = defaultSpaceId.length > 0 ? defaultSpaceId : activeSpaceId;
+                var chosen = saverConfirm.findSpace(preferredId) || spaceList[0] || null;
+                saverConfirm.spaceId = chosen ? chosen.id : "";
+                saverConfirm.spaceName = chosen ? chosen.name : "No space available";
+
+                saverConfirm.listId = "";
+                saverConfirm.listName = "No list";
+                if (chosen && chosen.id === defaultSpaceId && defaultListId.length > 0) {
+                    var lists = chosen.lists || [];
+                    for (var i = 0; i < lists.length; i++) {
+                        if (lists[i].id === defaultListId) {
+                            saverConfirm.listId = lists[i].id;
+                            saverConfirm.listName = lists[i].title;
+                            break;
+                        }
+                    }
+                }
+
+                confirmTextEdit.text = initialText;
+                saverConfirm.visible = true;
+            }
+
+            function selectSpace(id, name) {
+                saverConfirm.spaceId = id;
+                saverConfirm.spaceName = name;
+                saverConfirm.listId = "";
+                saverConfirm.listName = "No list";
+                saverConfirm.picking = "";
+            }
+
+            function selectList(id, name) {
+                saverConfirm.listId = id;
+                saverConfirm.listName = name;
+                saverConfirm.picking = "";
+            }
+
+            function cancel() {
+                saverConfirm.visible = false;
+                saverToast.show("Discarded", false);
+            }
+
+            function submit() {
+                var finalText = confirmTextEdit.text.trim();
+                if (finalText.length === 0) {
+                    return;
+                }
+                saverConfirm.visible = false;
+                saverToast.show("Saving " + saverToast.shorten(finalText) + "...", true);
+                saverSend.postTodo(saverConfirm.token, finalText,
+                                   saverConfirm.spaceId, saverConfirm.listId);
+            }
+
+            Column {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 32
+                spacing: 20
+                visible: saverConfirm.picking.length === 0
+
+                Text {
+                    text: "Save to Saver"
+                    font.pixelSize: 34
+                    font.bold: true
+                    color: "black"
+                }
+
+                Rectangle {
+                    width: parent.width
+                    height: 180
+                    color: "white"
+                    border.color: "black"
+                    border.width: 2
+                    radius: 6
+
+                    Flickable {
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        clip: true
+                        contentWidth: width
+                        contentHeight: confirmTextEdit.implicitHeight
+
+                        TextEdit {
+                            id: confirmTextEdit
+                            width: parent.width
+                            font.pixelSize: 28
+                            color: "black"
+                            wrapMode: TextEdit.Wrap
+                        }
+                    }
+                }
+
+                Row {
+                    width: parent.width
+                    spacing: 16
+
+                    Rectangle {
+                        width: (parent.width - 16) / 2
+                        height: 64
+                        color: "white"
+                        border.color: "black"
+                        border.width: 2
+                        radius: 6
+
+                        Text {
+                            anchors.fill: parent
+                            anchors.margins: 12
+                            text: "Space: " + saverConfirm.spaceName
+                            font.pixelSize: 24
+                            color: "black"
+                            elide: Text.ElideRight
+                            verticalAlignment: Text.AlignVCenter
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: saverConfirm.picking = "space"
+                        }
+                    }
+
+                    Rectangle {
+                        width: (parent.width - 16) / 2
+                        height: 64
+                        color: "white"
+                        border.color: "black"
+                        border.width: 2
+                        radius: 6
+                        opacity: saverConfirm.spaceId.length > 0 ? 1.0 : 0.4
+
+                        Text {
+                            anchors.fill: parent
+                            anchors.margins: 12
+                            text: "List: " + saverConfirm.listName
+                            font.pixelSize: 24
+                            color: "black"
+                            elide: Text.ElideRight
+                            verticalAlignment: Text.AlignVCenter
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            enabled: saverConfirm.spaceId.length > 0
+                            onClicked: saverConfirm.picking = "list"
+                        }
+                    }
+                }
+
+                Row {
+                    width: parent.width
+                    spacing: 16
+                    height: 76
+
+                    Rectangle {
+                        width: (parent.width - 16) / 2
+                        height: parent.height
+                        color: "white"
+                        border.color: "black"
+                        border.width: 2
+                        radius: 8
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "Cancel"
+                            font.pixelSize: 28
+                            color: "black"
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: saverConfirm.cancel()
+                        }
+                    }
+
+                    Rectangle {
+                        width: (parent.width - 16) / 2
+                        height: parent.height
+                        color: "white"
+                        border.color: "black"
+                        border.width: 3
+                        radius: 8
+                        opacity: confirmTextEdit.text.trim().length > 0 ? 1.0 : 0.35
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "Save"
+                            font.pixelSize: 28
+                            font.bold: true
+                            color: "black"
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            enabled: confirmTextEdit.text.trim().length > 0
+                            onClicked: saverConfirm.submit()
+                        }
+                    }
+                }
+            }
+
+            Column {
+                anchors.fill: parent
+                anchors.margins: 24
+                spacing: 16
+                visible: saverConfirm.picking.length > 0
+
+                Text {
+                    text: saverConfirm.picking === "space" ? "Choose a space" : "Choose a list"
+                    font.pixelSize: 30
+                    font.bold: true
+                    color: "black"
+                }
+
+                ListView {
+                    id: pickerList
+                    width: parent.width
+                    height: parent.height - 130
+                    clip: true
+                    model: {
+                        if (saverConfirm.picking === "space") {
+                            return saverConfirm.spaces;
+                        }
+                        if (saverConfirm.picking === "list") {
+                            var options = [{ id: "", title: "No list" }];
+                            return options.concat(saverConfirm.currentLists());
+                        }
+                        return [];
+                    }
+
+                    delegate: Rectangle {
+                        width: pickerList.width
+                        height: 72
+                        color: "white"
+
+                        Text {
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.leftMargin: 8
+                            text: saverConfirm.picking === "space" ? modelData.name : modelData.title
+                            font.pixelSize: 26
+                            color: "black"
+                        }
+
+                        Rectangle {
+                            anchors.bottom: parent.bottom
+                            width: parent.width
+                            height: 1
+                            color: "#d0d0d0"
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: {
+                                if (saverConfirm.picking === "space") {
+                                    saverConfirm.selectSpace(modelData.id, modelData.name);
+                                } else {
+                                    saverConfirm.selectList(modelData.id, modelData.title);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: parent.width
+                    height: 76
+                    color: "white"
+                    border.color: "black"
+                    border.width: 2
+                    radius: 8
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "Back"
+                        font.pixelSize: 28
+                        color: "black"
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: saverConfirm.picking = ""
+                    }
+                }
+            }
+        }
+        }
+    END TRAVERSE
+END AFFECT
+
+AFFECT /qml/device/view/documentview/HwcSelection.qml
+    TRAVERSE Item > HwcNotificationBar#handwritingBar
+        REPLACE onFinishedChanged WITH {
+        onFinishedChanged: {
+            if (!finished) {
+                return;
+            }
+            if (!root.visible) {
+                return;
+            }
+            Clipboard.text = recognitionJob.formattedTextToClipboardText();
+            if (Clipboard.hasText) {
+                conversionFinished();
+            }
+        }
+        }
+    END TRAVERSE
+END AFFECT

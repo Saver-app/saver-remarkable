@@ -1,0 +1,7 @@
+<RCC>
+    <qresource prefix="/ui">
+        <file alias="Main.qml">../../qml/Main.qml</file>
+        <file alias="PairingPage.qml">../../qml/PairingPage.qml</file>
+        <file alias="ItemsPage.qml">../../qml/ItemsPage.qml</file>
+    </qresource>
+</RCC>

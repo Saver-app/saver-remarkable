@@ -1,0 +1,92 @@
+
+AFFECT /qml/device/view/navigator/Sidebar.qml
+    IMPORT net.asivery.AppLoad 1.0
+
+    TRAVERSE DeviceKeyboardNavigationHandler > ColumnLayout#filterColumn
+        LOCATE AFTER DeviceKeyboardNavigationHandler#integrationsHandler
+        INSERT {
+        IconButton {
+            id: saverSidebarItem
+            objectName: "saverSidebarItem"
+            width: parent.width
+            enabled: visible
+            title: qsTr("Saver")
+            font.weight: Font.Medium
+            Layout.preferredHeight: visible ? Values.navigatorSidebarItemHeight : 0
+            Layout.preferredWidth: parent.width
+            navigationHandler: root
+
+            visible: false
+
+            readonly property string configPath: "file:///home/root/.config/saver-remarkable/config.toml"
+
+            function valueFromConfig(body, key) {
+                var quote = String.fromCharCode(34);
+                var lines = (body || "").split("\n");
+                for (var i = 0; i < lines.length; i++) {
+                    var line = lines[i].trim();
+                    if (line.indexOf(key) !== 0) {
+                        continue;
+                    }
+                    var rest = line.substring(key.length).trim();
+                    if (rest.charAt(0) !== "=") {
+                        continue;
+                    }
+                    var value = rest.substring(1).trim();
+                    if (value.length >= 2 && value.charAt(0) === quote
+                        && value.charAt(value.length - 1) === quote) {
+                        value = value.substring(1, value.length - 1);
+                    }
+                    return value;
+                }
+                return "";
+            }
+
+            function refreshVisibility() {
+                var req = new XMLHttpRequest();
+                req.onreadystatechange = function () {
+                    if (req.readyState !== XMLHttpRequest.DONE) {
+                        return;
+                    }
+                    var value = saverSidebarItem.valueFromConfig(req.responseText, "show_in_sidebar");
+                    saverSidebarItem.visible = value !== "false";
+                };
+                req.open("GET", saverSidebarItem.configPath);
+                req.send();
+            }
+
+            Component.onCompleted: refreshVisibility()
+
+            leftPadding: saverSidebarItem.padding + saverSidebarItem.size
+                         + saverSidebarItem.spacing
+
+            Image {
+                x: saverSidebarItem.padding
+                anchors.verticalCenter: parent.verticalCenter
+                width: saverSidebarItem.size
+                height: saverSidebarItem.size
+                fillMode: Image.PreserveAspectFit
+                smooth: true
+                source: "data:image/png;base64,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"
+            }
+
+            Timer {
+                interval: 5000
+                running: true
+                repeat: true
+                onTriggered: saverSidebarItem.refreshVisibility()
+            }
+
+            onClicked: {
+                AppLoadLauncher.requestLaunch("com.saverapp.remarkable", [], {}, false);
+                if (typeof root.sidebarMenuClicked === "function") {
+                    root.sidebarMenuClicked("Saver");
+                }
+                if (typeof root.resetFocusIndex === "function") {
+                    root.resetFocusIndex();
+                }
+            }
+        }
+        }
+    END TRAVERSE
+END AFFECT
