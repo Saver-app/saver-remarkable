@@ -33,13 +33,14 @@ build() {
 
 	cd "$srcdir"/saver-remarkable-"$pkgver"
 	cargo build --release --locked --target "$CARGO_BUILD_TARGET"
+	mv target/"$CARGO_BUILD_TARGET"/release/saver-remarkable .
 	rcc --binary -o packaging/appload/resources.rcc packaging/appload/app.qrc
 }
 
 package() {
 	set -e
 	cd "$srcdir"/saver-remarkable-"$pkgver"
-	install -Dm755 target/"$CARGO_BUILD_TARGET"/release/saver-remarkable \
+	install -Dm755 saver-remarkable \
 		"$pkgdir"/home/root/xovi/exthome/appload/com.saverapp.remarkable/backend/entry
 	install -Dm644 packaging/appload/manifest.json \
 		"$pkgdir"/home/root/xovi/exthome/appload/com.saverapp.remarkable/manifest.json
