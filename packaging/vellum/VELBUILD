@@ -1,6 +1,6 @@
 maintainer="Paul <70213368+LostPaul@users.noreply.github.com>"
 pkgname=saver-remarkable
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=0
 upstream_author="Saver-app"
 category="utilities"
@@ -87,5 +87,5 @@ capture() {
 	}
 }
 
-sha512sums='154f9fad58a5aaa4357727aeb4a26aea11c9428318df7cc9d631f933e2558fa07edfbcda8653044d16f47b9ca12bb42a8171dfda114bfd3dc434bc2d2d05daf6
-saver-remarkable-0.1.0.tar.gz'
+sha512sums='e05f81a9c8ce471edb8efcaf8bd300074dcfee7e03b88a280ad01ec8902c49d325e0a658ed669ce91110245214568fff0afb267b95196166aac1f545908b5cc7
+saver-remarkable-0.1.1.tar.gz'
