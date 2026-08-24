@@ -232,9 +232,8 @@ impl Backend {
                             self.config.notebook_default_list_id = None;
                             self.config.notebook_default_list_name = None;
                         } else if let Some(id) = req.notebook_default_space_id {
-                            self.config.notebook_default_space_id = Some(id);
-                            self.config.notebook_default_space_name =
-                                req.notebook_default_space_name;
+                            self.config
+                                .set_notebook_default_space(id, req.notebook_default_space_name);
                         }
                         if req.clear_notebook_default_list {
                             self.config.notebook_default_list_id = None;

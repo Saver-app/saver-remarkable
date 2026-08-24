@@ -89,6 +89,17 @@ impl Config {
         }
     }
 
+    /// The default list lives inside the default space, so moving the space
+    /// leaves it dangling.
+    pub fn set_notebook_default_space(&mut self, id: String, name: Option<String>) {
+        if self.notebook_default_space_id.as_deref() != Some(id.as_str()) {
+            self.notebook_default_list_id = None;
+            self.notebook_default_list_name = None;
+        }
+        self.notebook_default_space_id = Some(id);
+        self.notebook_default_space_name = name;
+    }
+
     pub fn confirm_notebook_todos(&self) -> bool {
         self.confirm_notebook_todos.unwrap_or(true)
     }
@@ -129,6 +140,31 @@ mod tests {
             with_api(Some("https://api.saver-app.com/remarkable/")).pairing_url(),
             "https://api.saver-app.com/remarkable/pair"
         );
+    }
+
+    fn with_default_list() -> Config {
+        Config {
+            notebook_default_space_id: Some("space-a".to_string()),
+            notebook_default_space_name: Some("Space A".to_string()),
+            notebook_default_list_id: Some("list-in-a".to_string()),
+            notebook_default_list_name: Some("Groceries".to_string()),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn a_new_default_space_drops_the_old_default_list() {
+        let mut config = with_default_list();
+        config.set_notebook_default_space("space-b".to_string(), Some("Space B".to_string()));
+        assert_eq!(config.notebook_default_list_id, None);
+        assert_eq!(config.notebook_default_list_name, None);
+    }
+
+    #[test]
+    fn reselecting_the_same_default_space_keeps_the_list() {
+        let mut config = with_default_list();
+        config.set_notebook_default_space("space-a".to_string(), Some("Space A".to_string()));
+        assert_eq!(config.notebook_default_list_id.as_deref(), Some("list-in-a"));
     }
 
     #[test]

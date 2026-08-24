@@ -81,8 +81,8 @@ the confirmed combinations above as known working.
   [reManager](https://github.com/rmitchellscott/reManager), available for
   Linux, macOS and Windows.
 - The optional sidebar and handwriting actions need
-  `qt-resource-rebuilder` and its one-time hashtable setup. The core AppLoad
-  app works without them.
+  `qt-resource-rebuilder`, `qt-command-executor`, and the resource rebuilder's
+  initial hashtable setup. The core AppLoad app works without them.
 
 ### Build computer
 
@@ -195,7 +195,7 @@ patches:
 SKIP_QMLDIFF=1 RCC=/path/to/rcc ./install-device.sh
 ```
 
-Use this core-only mode if you have the incompatible
+Use this core-only mode if you have the incompatible `retaskable-capture` or
 `convert-to-text-remover` QML mod installed. `SKIP_QMLDIFF` does not remove
 patches from an earlier installation. Remove both Saver `.qmd` files using the
 commands under [Update or remove](#update-or-remove) before switching modes.
@@ -244,8 +244,8 @@ the tablet must be online and signed in to a reMarkable account.
   `ssh root@10.11.99.1 rm-ssh-over-wlan on`, then retry with the tablet's
   Wi-Fi address.
 - **The sidebar or handwriting action is missing:** rebuild the hashtable,
-  rerun the installer, and check for `convert-to-text-remover` or a
-  firmware/QML-patch mismatch.
+  rerun the installer, and check for `retaskable-capture`,
+  `convert-to-text-remover`, or a firmware/QML-patch mismatch.
 - **A reinstall appears unchanged:** close Saver completely and reopen it from
   AppLoad so the new backend and `resources.rcc` are loaded.
 - **Saver opens and immediately closes:** inspect the xochitl journal for
@@ -303,8 +303,10 @@ another tablet mod uses them.
 
 The tablet UI is QML, loaded by AppLoad from `resources.rcc`. A native Rust
 backend communicates with it over AppLoad IPC and sends authenticated HTTPS
-requests to Saver. The executable expects an AppLoad socket, so `cargo run`
-is not a standalone desktop preview.
+requests to Saver. The handwriting patch invokes the same executable's
+capture command path, keeping the device token and effective API URL in
+Rust. Running the full UI still requires an AppLoad socket, so `cargo run` is
+not a standalone desktop preview.
 
 | Path | Purpose |
 | --- | --- |

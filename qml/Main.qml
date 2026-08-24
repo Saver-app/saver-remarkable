@@ -285,6 +285,7 @@ Item {
             endpoint.sendMessage(1002, JSON.stringify({
                 notebookDefaultSpaceId: spaceId,
                 notebookDefaultSpaceName: spaceName,
+                clearNotebookDefaultList: true,
             }))
         }
         onClearNotebookDefaultSpace: {

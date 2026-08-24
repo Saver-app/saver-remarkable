@@ -67,7 +67,9 @@ capture() {
 	depends="
 	saver-remarkable
 	qt-resource-rebuilder
+	qt-command-executor
 	!convert-to-text-remover
+	!retaskable-capture
 	remarkable-os>=3.26
 	remarkable-os<3.28
 	"

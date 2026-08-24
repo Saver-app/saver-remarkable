@@ -1,6 +1,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import net.asivery.ApploadUtils 1.0
 
 Page {
     id: page
@@ -32,6 +33,35 @@ Page {
     }
 
     property var spaces: []
+
+    // Drop a stored default the account no longer has, rather than sending it
+    // with handwritten todos.
+    onSpacesChanged: {
+        if (page.spaces.length === 0)
+            return
+        if (page.notebookDefaultSpaceId.length > 0) {
+            var known = false
+            for (var s = 0; s < page.spaces.length; s++) {
+                if (page.spaces[s].id === page.notebookDefaultSpaceId) {
+                    known = true
+                    break
+                }
+            }
+            if (!known) {
+                page.clearNotebookDefaultSpace()
+                return
+            }
+        }
+        if (page.notebookDefaultListId.length === 0)
+            return
+        var lists = page.topLevelLists(page.notebookDefaultSpaceId)
+        for (var i = 0; i < lists.length; i++) {
+            if (lists[i].id === page.notebookDefaultListId)
+                return
+        }
+        page.clearNotebookDefaultList()
+    }
+
     property int spaceIndex: 0
 
     property var todoPath: []
@@ -427,6 +457,40 @@ Page {
         color: "#d0d0d0"
     }
 
+    component SaverListView: ListView {
+        clip: true
+        flickableDirection: Flickable.VerticalFlick
+        boundsBehavior: Flickable.StopAtBounds
+
+        pressDelay: 120
+
+        pixelAligned: true
+
+        ScrollBar.vertical: ScrollBar { width: 16 }
+    }
+
+    component SaverScrollView: Item {
+        id: scrollRoot
+
+        property alias model: list.model
+        property alias delegate: list.delegate
+        property alias contentHeight: list.contentHeight
+
+        implicitHeight: list.contentHeight
+
+        SaverListView {
+            id: list
+            anchors.fill: parent
+        }
+
+        DisplayMethodArea {
+            anchors.fill: parent
+            displayMethod: list.moving
+                ? DisplayMethodArea.Animate
+                : DisplayMethodArea.UI
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -495,11 +559,9 @@ Page {
                         width: spaceSelector.width
                         implicitHeight: Math.min(contentItem.implicitHeight, 600)
                         padding: 2
-                        contentItem: ListView {
-                            clip: true
+                        contentItem: SaverScrollView {
                             implicitHeight: contentHeight
                             model: spaceSelector.popup.visible ? spaceSelector.delegateModel : null
-                            ScrollBar.vertical: ScrollBar { width: 14 }
                         }
                         background: Rectangle {
                             color: "white"
@@ -686,13 +748,11 @@ Page {
                     path: page.todoPath
                     Layout.fillWidth: true
                 }
-                ListView {
+                SaverScrollView {
                     id: todoList
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    clip: true
                     model: todosModel
-                    ScrollBar.vertical: ScrollBar { width: 16 }
 
                     delegate: Item {
                         width: todoList.width
@@ -863,13 +923,11 @@ Page {
                     path: page.bookmarkPath
                     Layout.fillWidth: true
                 }
-                ListView {
+                SaverScrollView {
                     id: bookmarkList
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    clip: true
                     model: bookmarksModel
-                    ScrollBar.vertical: ScrollBar { width: 16 }
 
                     delegate: Item {
                         width: bookmarkList.width
@@ -962,11 +1020,9 @@ Page {
                 }
             }
 
-            ListView {
+            SaverScrollView {
                 id: habitList
-                clip: true
                 model: habitsModel
-                ScrollBar.vertical: ScrollBar { width: 16 }
 
                 delegate: Item {
                     width: habitList.width
@@ -1863,12 +1919,10 @@ Page {
                 Layout.fillWidth: true
             }
 
-            ListView {
+            SaverScrollView {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                clip: true
                 model: settingsPicker.optionsModel()
-                ScrollBar.vertical: ScrollBar { width: 16 }
 
                 delegate: Item {
                     width: ListView.view.width

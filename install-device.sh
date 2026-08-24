@@ -140,6 +140,7 @@ if [[ -z "${SKIP_DEPS:-}" ]]; then
     ensure_extension appload.so appload
     if [[ -z "${SKIP_QMLDIFF:-}" ]]; then
         ensure_extension qt-resource-rebuilder.so qt-resource-rebuilder
+        ensure_extension qt-command-executor.so qt-command-executor
         if ! ssh_ "test -s /home/root/xovi/exthome/qt-resource-rebuilder/hashtab" 2>/dev/null; then
             echo
             echo "  NOTE: qt-resource-rebuilder has no hashtable yet, so the QML"

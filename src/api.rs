@@ -55,7 +55,7 @@ impl SaverClient {
         }
     }
 
-    fn call(&self, body: serde_json::Value) -> Result<serde_json::Value> {
+    pub(crate) fn call(&self, body: serde_json::Value) -> Result<serde_json::Value> {
         let response = self
             .http
             .post(&self.base_url)

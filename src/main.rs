@@ -1,6 +1,7 @@
 mod api;
 mod appload;
 mod backend;
+mod capture;
 mod config;
 mod models;
 mod pairing;
@@ -12,12 +13,17 @@ use backend::Backend;
 use config::Config;
 
 fn main() -> Result<()> {
-    let socket_path = std::env::args()
-        .nth(1)
-        .context("expected the AppLoad socket path as argv[1]")?;
+    let mut args = std::env::args().skip(1);
+    let first = args
+        .next()
+        .context("expected the AppLoad socket path or a capture command as argv[1]")?;
+
+    if first.starts_with("--capture-") {
+        return capture::run(&first, args.next().as_deref());
+    }
 
     let config = Config::load()?;
-    let socket = AppLoadSocket::connect(&socket_path)?;
+    let socket = AppLoadSocket::connect(&first)?;
     let result = Backend::new(config).run(socket);
     if let Err(err) = &result {
         eprintln!("saver-remarkable: {err:#}");

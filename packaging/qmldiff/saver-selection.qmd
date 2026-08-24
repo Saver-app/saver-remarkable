@@ -1,5 +1,7 @@
 
 AFFECT /qml/common/SceneSelectionHandler.qml
+    IMPORT net.asivery.CommandExecutor 1.0
+
     TRAVERSE Item > SelectionContextualMenu#tools
         LOCATE AFTER ArkControls.ContextualMenu.Button#convertToText
         INSERT {
@@ -12,51 +14,73 @@ AFFECT /qml/common/SceneSelectionHandler.qml
 
             property bool armed: false
 
-            property var pendingRequest: null
+            property string pendingOperation: ""
+            property var pendingContext: ({})
+            property string commandOutput: ""
+            property bool commandTimedOut: false
 
             Timer {
                 id: saverRequestWatchdog
                 interval: 20000
                 repeat: false
                 onTriggered: {
-                    if (saverSend.pendingRequest) {
-                        saverSend.pendingRequest.abort();
-                        saverSend.pendingRequest = null;
+                    if (saverCommand.running) {
+                        saverSend.commandTimedOut = true;
+                        saverCommand.terminateCommand(100);
+                        saverToast.show("Saver took too long to respond. Check WiFi", false);
                     }
                 }
             }
 
+            // The recognizer can fail without ever publishing a job, so the
+            // signals below are a fast path and this poll is what ends the wait.
             Timer {
-                id: saverConvertWatchdog
-                interval: 45000
-                repeat: false
-                onTriggered: {
-                    if (saverSend.armed) {
-                        saverSend.armed = false;
-                        saverToast.show("Handwriting conversion timed out - check your Wi-Fi", false);
+                id: saverJobPoll
+                interval: 400
+                repeat: true
+                running: saverSend.armed
+
+                property int ticks: 0
+                readonly property int startGrace: 13   // ~5s to publish a job
+                readonly property int limit: 50        // ~20s overall
+
+                onRunningChanged: {
+                    if (running) {
+                        saverJobPoll.ticks = 0;
                     }
+                }
+
+                onTriggered: {
+                    saverJobPoll.ticks += 1;
+                    saverSend.handleJobUpdate();
                 }
             }
 
-            function trackRequest(request) {
-                saverSend.pendingRequest = request;
-                saverRequestWatchdog.restart();
-            }
+            AsyncCommandExecutor {
+                id: saverCommand
+                command: "/home/root/xovi/exthome/appload/com.saverapp.remarkable/backend/entry"
+                environment: ({ "HOME": "/home/root" })
 
-            function finishRequest() {
-                saverSend.pendingRequest = null;
-                saverRequestWatchdog.stop();
-            }
+                onStdOutAvailable: function (output) {
+                    saverSend.commandOutput += output;
+                }
 
-            readonly property string apiUrl: "https://api.saver-app.com/remarkable"
-            readonly property string configPath: "file:///home/root/.config/saver-remarkable/config.toml"
+                onStdErrAvailable: function (errors) {
+                    console.log("SAVER: capture backend stderr:", errors);
+                }
+
+                onRunningChanged: {
+                    if (!running && saverSend.pendingOperation.length > 0) {
+                        saverSend.finishCommand();
+                    }
+                }
+            }
 
             onClicked: {
                 if (!controller) {
                     return;
                 }
                 saverSend.armed = true;
-                saverConvertWatchdog.restart();
                 saverToast.show("Converting handwriting...", true);
                 Recognizer.startSelectionToolJob(
                     controller.cloneSelectedItems(controller.currentLayer, saverSend.cloneScale()),
@@ -85,21 +109,65 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                 enabled: saverSend.armed
 
                 function onStatusChanged() {
-                    var job = Recognizer.selectionToolJob;
-                    if (!job) {
-                        return;
-                    }
-                    if (job.status === RecognitionJob.Status.Done) {
-                        saverSend.armed = false;
-                        saverConvertWatchdog.stop();
-                        saverSend.beginFlow(job.plainText);
-                    } else if (job.status === RecognitionJob.Status.Error) {
-                        saverSend.armed = false;
-                        saverConvertWatchdog.stop();
-                        saverToast.show(saverSend.errorMessage(job.error), false);
-                        console.log("SAVER: conversion failed, error =", job.error);
-                    }
+                    saverSend.handleJobUpdate();
                 }
+
+                function onErrorChanged() {
+                    saverSend.handleJobUpdate();
+                }
+
+                function onFinished() {
+                    saverSend.handleJobUpdate();
+                }
+            }
+
+            Connections {
+                target: Recognizer
+                enabled: saverSend.armed
+
+                function onSelectionToolJobChanged() {
+                    saverSend.handleJobUpdate();
+                }
+            }
+
+            function handleJobUpdate() {
+                if (!saverSend.armed) {
+                    return;
+                }
+
+                var job = Recognizer.selectionToolJob;
+                if (!job) {
+                    if (saverJobPoll.ticks >= saverJobPoll.startGrace) {
+                        saverSend.finishConversion();
+                        saverToast.show("Conversion did not start. Check WiFi", false);
+                    }
+                    return;
+                }
+
+                if (job.error !== undefined
+                    && job.error !== RecognitionJob.ConvertError.NoError) {
+                    saverSend.finishConversion();
+                    saverToast.show(saverSend.errorMessage(job.error), false);
+                    return;
+                }
+                if (job.status === RecognitionJob.Status.Done) {
+                    saverSend.finishConversion();
+                    saverSend.beginFlow(job.plainText);
+                    return;
+                }
+                if (job.status !== RecognitionJob.Status.Processing) {
+                    saverSend.finishConversion();
+                    saverToast.show(saverSend.errorMessage(job.error), false);
+                    return;
+                }
+                if (saverJobPoll.ticks >= saverJobPoll.limit) {
+                    saverSend.finishConversion();
+                    saverToast.show("Handwriting conversion timed out. Check WiFi", false);
+                }
+            }
+
+            function finishConversion() {
+                saverSend.armed = false;
             }
 
             function errorMessage(code) {
@@ -107,62 +175,16 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                     return "Sign in to reMarkable to convert handwriting";
                 }
                 if (code === RecognitionJob.ConvertError.NetworkError) {
-                    return "No connection - conversion needs Wi-Fi";
+                    return "No connection. Conversion needs WiFi";
                 }
-                if (code === RecognitionJob.ConvertError.NoText) {
+                if (code === RecognitionJob.ConvertError.ServerError) {
+                    return "Conversion failed. Check WiFi, then try again";
+                }
+                if (code === RecognitionJob.ConvertError.NoText
+                    || code === RecognitionJob.ConvertError.NoTasks) {
                     return "No handwriting recognised";
                 }
                 return "Handwriting conversion failed";
-            }
-
-            function valueFromConfig(body, key) {
-                var quote = String.fromCharCode(34);
-                var lines = (body || "").split("\n");
-                for (var i = 0; i < lines.length; i++) {
-                    var line = lines[i].trim();
-                    if (line.indexOf(key) !== 0) {
-                        continue;
-                    }
-                    var rest = line.substring(key.length).trim();
-                    if (rest.charAt(0) !== "=") {
-                        continue;
-                    }
-                    var value = rest.substring(1).trim();
-                    if (value.length >= 2 && value.charAt(0) === quote
-                        && value.charAt(value.length - 1) === quote) {
-                        value = value.substring(1, value.length - 1);
-                    }
-                    return value;
-                }
-                return "";
-            }
-
-            function readConfig(onDone) {
-                var cfg = new XMLHttpRequest();
-                cfg.onreadystatechange = function () {
-                    if (cfg.readyState !== XMLHttpRequest.DONE) {
-                        return;
-                    }
-                    var body = cfg.responseText;
-                    var token = saverSend.valueFromConfig(body, "device_token");
-                    var confirmValue = saverSend.valueFromConfig(body, "confirm_notebook_todos");
-                    var defaultSpaceId = saverSend.valueFromConfig(body, "notebook_default_space_id");
-                    var defaultSpaceName = saverSend.valueFromConfig(body, "notebook_default_space_name");
-                    var defaultListId = defaultSpaceId.length > 0
-                        ? saverSend.valueFromConfig(body, "notebook_default_list_id") : "";
-                    var defaultListName = defaultSpaceId.length > 0
-                        ? saverSend.valueFromConfig(body, "notebook_default_list_name") : "";
-                    onDone({
-                        token: token,
-                        confirmFirst: confirmValue !== "false",
-                        defaultSpaceId: defaultSpaceId,
-                        defaultSpaceName: defaultSpaceName,
-                        defaultListId: defaultListId,
-                        defaultListName: defaultListName,
-                    });
-                };
-                cfg.open("GET", saverSend.configPath);
-                cfg.send();
             }
 
             function beginFlow(text) {
@@ -172,50 +194,168 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                     return;
                 }
 
-                saverSend.readConfig(function (config) {
-                    if (config.token.length === 0) {
-                        saverToast.show("Link the tablet in the Saver app first", false);
-                        console.log("SAVER: no device token in config");
+                saverSend.runCommand("config", ["--capture-config"], { text: trimmed });
+            }
+
+            function runCommand(operation, args, context) {
+                if (saverCommand.running) {
+                    saverToast.show("Saver is already handling a request", false);
+                    return;
+                }
+                saverSend.pendingOperation = operation;
+                saverSend.pendingContext = context || {};
+                saverSend.commandOutput = "";
+                saverSend.commandTimedOut = false;
+                saverCommand.arguments = args;
+                if (!saverCommand.startCommand()) {
+                    saverSend.pendingOperation = "";
+                    saverToast.show("Could not start Saver", false);
+                    return;
+                }
+                saverRequestWatchdog.restart();
+            }
+
+            function finishCommand() {
+                saverRequestWatchdog.stop();
+                var operation = saverSend.pendingOperation;
+                var context = saverSend.pendingContext;
+                var output = saverSend.commandOutput;
+                var timedOut = saverSend.commandTimedOut;
+                saverSend.pendingOperation = "";
+                saverSend.pendingContext = {};
+                saverSend.commandOutput = "";
+                saverSend.commandTimedOut = false;
+
+                if (timedOut) {
+                    return;
+                }
+
+                var response;
+                try {
+                    response = JSON.parse(output);
+                } catch (err) {
+                    console.log("SAVER: invalid capture backend response:", output);
+                    response = { error: "Invalid response from Saver" };
+                }
+                if (!response || typeof response !== "object") {
+                    response = { error: "Invalid response from Saver" };
+                }
+                saverSend.handleCommandResult(operation, response, context);
+            }
+
+            function handleCommandResult(operation, response, context) {
+                if (operation === "config") {
+                    if (response.error) {
+                        console.log("SAVER: capture config ->", response.error);
+                        saverToast.show("Could not read Saver settings", false);
                         return;
                     }
-                    if (!config.confirmFirst) {
-                        saverToast.show("Saving " + saverToast.shorten(trimmed) + "...", true);
-                        saverSend.postTodo(config.token, trimmed,
-                                           config.defaultSpaceId, config.defaultListId);
+                    if (!response.hasToken) {
+                        saverToast.show("Link the tablet in the Saver app first", false);
+                        console.log("SAVER: no device token available to capture backend");
+                        return;
+                    }
+                    var defaultSpaceId = response.notebookDefaultSpaceId || "";
+                    var defaultListId = defaultSpaceId.length > 0
+                        ? (response.notebookDefaultListId || "") : "";
+                    if (response.confirmNotebookTodos === false) {
+                        saverToast.show("Saving " + saverToast.shorten(context.text) + "...", true);
+                        saverSend.fetchPickerOptions(context.text, defaultSpaceId, defaultListId,
+                                                     true);
                         return;
                     }
                     saverToast.show("Loading your spaces...", true);
-                    saverSend.fetchPickerOptions(config.token, trimmed,
-                                                 config.defaultSpaceId, config.defaultListId);
-                });
-            }
+                    saverSend.fetchPickerOptions(context.text, defaultSpaceId, defaultListId,
+                                                 false);
+                    return;
+                }
 
-            function fetchPickerOptions(token, text, defaultSpaceId, defaultListId) {
-                var list = new XMLHttpRequest();
-                list.onreadystatechange = function () {
-                    if (list.readyState !== XMLHttpRequest.DONE) {
+                if (operation === "list") {
+                    if (response.error) {
+                        console.log("SAVER: listPickerOptions ->", response.error);
+                        saverToast.show("Could not reach Saver. Check WiFi", false);
                         return;
                     }
-                    saverSend.finishRequest();
-                    if (list.status !== 200) {
-                        console.log("SAVER: listPickerOptions ->", list.status, list.responseText);
-                        saverToast.show("Could not load spaces - saving to your active space", true);
-                        saverSend.postTodo(token, text, defaultSpaceId, defaultListId);
+                    if (context.auto) {
+                        var target = saverSend.resolveTarget(response.spaces || [],
+                                                             response.activeSpaceId || "",
+                                                             context.defaultSpaceId,
+                                                             context.defaultListId);
+                        if (!target.spaceId) {
+                            saverToast.show("No Saver space to save to", false);
+                            return;
+                        }
+                        saverSend.postTodo(context.text, target.spaceId, target.listId);
                         return;
                     }
-                    var parsed = JSON.parse(list.responseText);
                     saverToast.show("", false);
-                    saverConfirm.openFor(text, parsed.spaces || [], parsed.activeSpaceId || "",
-                                         token, defaultSpaceId, defaultListId);
-                };
-                list.open("POST", saverSend.apiUrl);
-                list.setRequestHeader("Content-Type", "application/json");
-                list.setRequestHeader("Authorization", "Bearer " + token);
-                saverSend.trackRequest(list);
-                list.send(JSON.stringify({ op: "listPickerOptions" }));
+                    saverConfirm.openFor(context.text, response.spaces || [],
+                                         response.activeSpaceId || "",
+                                         context.defaultSpaceId, context.defaultListId);
+                    return;
+                }
+
+                if (operation === "create") {
+                    console.log("SAVER: createTodoFromNotebook ->", JSON.stringify(response));
+                    if (response.error) {
+                        saverToast.show(response.error, false);
+                    } else {
+                        saverToast.show("Added to Saver: " + saverToast.shorten(context.text), false);
+                    }
+                }
             }
 
-            function postTodo(token, text, spaceId, parentId) {
+            function fetchPickerOptions(text, defaultSpaceId, defaultListId, auto) {
+                saverSend.runCommand("list",
+                                     ["--capture-api", JSON.stringify({ op: "listPickerOptions" })],
+                                     {
+                                         text: text,
+                                         defaultSpaceId: defaultSpaceId,
+                                         defaultListId: defaultListId,
+                                         auto: auto === true,
+                                     });
+            }
+
+            // A stored default is only a preference: the space or list can be
+            // deleted from the web app after it was picked.
+            function resolveTarget(spaces, activeSpaceId, defaultSpaceId, defaultListId) {
+                var space = null;
+                for (var i = 0; i < spaces.length; i++) {
+                    if (spaces[i].id === defaultSpaceId) {
+                        space = spaces[i];
+                        break;
+                    }
+                }
+                for (var j = 0; !space && j < spaces.length; j++) {
+                    if (spaces[j].id === activeSpaceId) {
+                        space = spaces[j];
+                    }
+                }
+                if (!space) {
+                    space = spaces.length > 0 ? spaces[0] : null;
+                }
+                if (!space) {
+                    return { spaceId: "", spaceName: "No space available",
+                             listId: "", listName: "No list" };
+                }
+
+                var listId = "";
+                var listName = "No list";
+                if (space.id === defaultSpaceId && defaultListId.length > 0) {
+                    var lists = space.lists || [];
+                    for (var k = 0; k < lists.length; k++) {
+                        if (lists[k].id === defaultListId) {
+                            listId = lists[k].id;
+                            listName = lists[k].title;
+                            break;
+                        }
+                    }
+                }
+                return { spaceId: space.id, spaceName: space.name,
+                         listId: listId, listName: listName };
+            }
+
+            function postTodo(text, spaceId, parentId) {
                 var body = { op: "createTodoFromNotebook", text: text };
                 if (spaceId.length > 0) {
                     body.spaceId = spaceId;
@@ -224,26 +364,8 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                     body.parentId = parentId;
                 }
 
-                var post = new XMLHttpRequest();
-                post.onreadystatechange = function () {
-                    if (post.readyState !== XMLHttpRequest.DONE) {
-                        return;
-                    }
-                    saverSend.finishRequest();
-                    console.log("SAVER: createTodoFromNotebook ->", post.status, post.responseText);
-                    if (post.status === 200) {
-                        saverToast.show("Added to Saver: " + saverToast.shorten(text), false);
-                    } else if (post.status === 0) {
-                        saverToast.show("Could not reach Saver - check Wi-Fi", false);
-                    } else {
-                        saverToast.show("Saver rejected it (" + post.status + ")", false);
-                    }
-                };
-                post.open("POST", saverSend.apiUrl);
-                post.setRequestHeader("Content-Type", "application/json");
-                post.setRequestHeader("Authorization", "Bearer " + token);
-                saverSend.trackRequest(post);
-                post.send(JSON.stringify(body));
+                saverSend.runCommand("create", ["--capture-api", JSON.stringify(body)],
+                                     { text: text });
             }
         }
         }
@@ -288,6 +410,18 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                 onTriggered: saverToast.message = ""
             }
 
+            // Anchor to the window root, not to the selection handler's item,
+            // which can be hidden as soon as a conversion ends.
+            Component.onCompleted: {
+                var top = saverToast.parent;
+                while (top && top.parent) {
+                    top = top.parent;
+                }
+                if (top && top !== saverToast.parent) {
+                    saverToast.parent = top;
+                }
+            }
+
             function show(text, sticky) {
                 saverToast.message = text;
                 saverToastTimer.stop();
@@ -309,7 +443,6 @@ AFFECT /qml/common/SceneSelectionHandler.qml
         Rectangle {
             id: saverConfirm
 
-            property string token: ""
             property string text: ""
             property var spaces: []
             property string spaceId: ""
@@ -345,30 +478,18 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                 return (space && space.lists) ? space.lists : [];
             }
 
-            function openFor(initialText, spaceList, activeSpaceId, authToken,
+            function openFor(initialText, spaceList, activeSpaceId,
                              defaultSpaceId, defaultListId) {
-                saverConfirm.token = authToken;
                 saverConfirm.text = initialText;
                 saverConfirm.spaces = spaceList;
                 saverConfirm.picking = "";
 
-                var preferredId = defaultSpaceId.length > 0 ? defaultSpaceId : activeSpaceId;
-                var chosen = saverConfirm.findSpace(preferredId) || spaceList[0] || null;
-                saverConfirm.spaceId = chosen ? chosen.id : "";
-                saverConfirm.spaceName = chosen ? chosen.name : "No space available";
-
-                saverConfirm.listId = "";
-                saverConfirm.listName = "No list";
-                if (chosen && chosen.id === defaultSpaceId && defaultListId.length > 0) {
-                    var lists = chosen.lists || [];
-                    for (var i = 0; i < lists.length; i++) {
-                        if (lists[i].id === defaultListId) {
-                            saverConfirm.listId = lists[i].id;
-                            saverConfirm.listName = lists[i].title;
-                            break;
-                        }
-                    }
-                }
+                var target = saverSend.resolveTarget(spaceList, activeSpaceId,
+                                                     defaultSpaceId, defaultListId);
+                saverConfirm.spaceId = target.spaceId;
+                saverConfirm.spaceName = target.spaceName;
+                saverConfirm.listId = target.listId;
+                saverConfirm.listName = target.listName;
 
                 confirmTextEdit.text = initialText;
                 saverConfirm.visible = true;
@@ -400,8 +521,7 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                 }
                 saverConfirm.visible = false;
                 saverToast.show("Saving " + saverToast.shorten(finalText) + "...", true);
-                saverSend.postTodo(saverConfirm.token, finalText,
-                                   saverConfirm.spaceId, saverConfirm.listId);
+                saverSend.postTodo(finalText, saverConfirm.spaceId, saverConfirm.listId);
             }
 
             Column {

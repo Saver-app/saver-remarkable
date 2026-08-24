@@ -25,8 +25,11 @@ rewrites onto the backend functions:
 | `POST https://api.saver-app.com/remarkable/pair` | `remarkablePairing` |
 
 `SAVER_API_BASE_URL` can point straight at a function's raw URL instead, for
-developing against a local emulator. The hosting layer caps a proxied
-request at 60s.
+developing against a local emulator, and `SAVER_PAIRING_URL` overrides the
+pairing endpoint on its own. Both have `config.toml` equivalents,
+`api_base_url` and `pairing_url`, which apply to every entry point rather
+than only to the process that inherits the variable. The hosting layer caps
+a proxied request at 60s.
 
 ## Auth: pairing, then device tokens
 
@@ -150,6 +153,15 @@ and `MSG_SET_HABIT_COUNT` (1009) wraps `setHabitCount`. Each has a matching
 are backend-local: they read and write `config.toml`, including the
 notebook-capture settings (confirm-before-saving, default space/list,
 sidebar visibility) rather than calling the REST API at all.
+
+The system handwriting patch cannot assume that an AppLoad frontend is open,
+so it starts the installed backend executable in a temporary capture mode.
+That mode loads the same `Config` as the AppLoad backend and proxies only the
+capture requests, so the device token and the effective API URL are resolved
+in Rust and neither is handed to xochitl's QML. The command executor starts
+that process with a minimal environment, so point this path at another
+backend through `api_base_url` in `config.toml`: `SAVER_API_BASE_URL` and
+`SAVER_DEVICE_TOKEN` only reach the backend that AppLoad launches.
 
 ## Pairing protocol (`remarkablePairing`)
 
