@@ -164,7 +164,10 @@ mod tests {
     fn reselecting_the_same_default_space_keeps_the_list() {
         let mut config = with_default_list();
         config.set_notebook_default_space("space-a".to_string(), Some("Space A".to_string()));
-        assert_eq!(config.notebook_default_list_id.as_deref(), Some("list-in-a"));
+        assert_eq!(
+            config.notebook_default_list_id.as_deref(),
+            Some("list-in-a")
+        );
     }
 
     #[test]

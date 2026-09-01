@@ -11,6 +11,7 @@ Page {
 
     property bool confirmNotebookTodos: true
     property bool showInSidebar: true
+    property string timeZone: "UTC"
 
     property string notebookDefaultSpaceId: ""
     property string notebookDefaultSpaceName: ""
@@ -73,9 +74,10 @@ Page {
     signal unlink()
     signal closeApp()
     signal setActiveSpace(string spaceId)
-    signal createTodo(string spaceId, string text, var parentId, bool isList)
+    signal createTodo(string spaceId, string text, var parentId, bool isList,
+                      var reminder)
     signal createBookmark(string spaceId, string title, string url,
-                          bool isList, var parentId)
+                          bool isList, var parentId, var reminder)
     signal createHabit(string spaceId, string name, var requirement)
     signal updateHabit(string spaceId, string habitId, string name,
                        var requirement)
@@ -85,9 +87,11 @@ Page {
     signal clearNotebookDefaultSpace()
     signal setNotebookDefaultList(string listId, string listName)
     signal clearNotebookDefaultList()
-    signal updateTodo(string spaceId, string todoId, string text)
+    signal updateTodo(string spaceId, string todoId, string text,
+                      var reminder, bool removeReminder)
     signal updateBookmark(string spaceId, string bookmarkId, string title,
-                          string url, bool isList)
+                          string url, bool isList, var reminder,
+                          bool removeReminder)
 
     background: Rectangle { color: "white" }
 
@@ -148,6 +152,21 @@ Page {
         })
     }
 
+    // Keep this serialized so ListModel does not convert it to QQmlListModel.
+    function packWeekdays(weekdays) {
+        return (weekdays || []).join(",")
+    }
+
+    function unpackWeekdays(packed) {
+        var out = []
+        var parts = String(packed || "").split(",")
+        for (var i = 0; i < parts.length; i++) {
+            var day = parseInt(parts[i], 10)
+            if (!isNaN(day)) out.push(day)
+        }
+        return out
+    }
+
     function rebuild() {
         todosModel.clear()
         bookmarksModel.clear()
@@ -169,6 +188,11 @@ Page {
                 isDone: todo.isDone === true,
                 isList: todo.isList === true,
                 hasSubTodos: todo.hasSubTodos === true,
+                reminderAt: todo.reminderAt || "",
+                reminderRepeatWeekdays: packWeekdays(todo.reminderRepeatWeekdays),
+                reminderTimeZone: todo.reminderTimeZone || page.timeZone,
+                reminderPlaysSound: todo.reminderPlaysSound !== false,
+                reminderIsImportant: todo.reminderIsImportant === true,
             })
         }
 
@@ -184,6 +208,11 @@ Page {
                 title: bookmark.title || "",
                 url: bookmark.url || "",
                 isList: bookmark.isList === true,
+                reminderAt: bookmark.reminderAt || "",
+                reminderRepeatWeekdays: packWeekdays(bookmark.reminderRepeatWeekdays),
+                reminderTimeZone: bookmark.reminderTimeZone || page.timeZone,
+                reminderPlaysSound: bookmark.reminderPlaysSound !== false,
+                reminderIsImportant: bookmark.reminderIsImportant === true,
             })
         }
 
@@ -425,6 +454,77 @@ Page {
             wrapMode: Text.WordWrap
         }
         background: Rectangle {
+            color: "white"
+            border.color: "black"
+            border.width: selected ? 5 : 2
+            radius: 8
+        }
+    }
+
+    component ReminderOptionButton: Button {
+        property string labelText: ""
+        property bool selected: false
+
+        Layout.fillWidth: true
+        Layout.preferredHeight: 82
+        contentItem: Text {
+            text: labelText
+            font.pixelSize: 25
+            font.bold: selected
+            color: "black"
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+        }
+        background: Rectangle {
+            color: "white"
+            border.color: "black"
+            border.width: selected ? 5 : 2
+            radius: 8
+        }
+    }
+
+    component PresetButton: Button {
+        property string labelText: ""
+        property bool selected: false
+
+        Layout.fillWidth: true
+        Layout.preferredWidth: 220
+        Layout.preferredHeight: 88
+        contentItem: Text {
+            text: labelText
+            font.pixelSize: 25
+            font.bold: selected
+            color: "black"
+            elide: Text.ElideRight
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+        }
+        background: Rectangle {
+            color: "white"
+            border.color: "black"
+            border.width: selected ? 5 : 2
+            radius: 8
+        }
+    }
+
+    component CalendarDay: Button {
+        property int day: 0
+        property bool selected: false
+
+        Layout.fillWidth: true
+        Layout.preferredWidth: 100
+        Layout.preferredHeight: 96
+        enabled: day > 0
+        contentItem: Text {
+            text: day > 0 ? day : ""
+            font.pixelSize: 30
+            font.bold: selected
+            color: "black"
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+        }
+        background: Rectangle {
+            visible: day > 0
             color: "white"
             border.color: "black"
             border.width: selected ? 5 : 2
@@ -1163,6 +1263,21 @@ Page {
         property int habitApprovals: 1
         property var habitAnchor: new Date()
 
+        property bool reminderEnabled: false
+        property bool hadReminder: false
+        property var reminderAt: new Date()
+        property var reminderWeekdays: []
+        property bool reminderPlaysSound: true
+        property bool reminderIsImportant: false
+
+        property string reminderPicking: ""
+        property bool reminderNudging: false
+        property string repeatMode: "none"
+
+        readonly property bool reminderSection: reminderEnabled
+            && (kind === "todo" || kind === "bookmark")
+        property var calendarMonth: new Date()
+
         readonly property bool habitIsEveryday: habitMode === "everyday"
 
         readonly property bool isEdit: {
@@ -1203,6 +1318,144 @@ Page {
             var monday = new Date(now.getFullYear(), now.getMonth(),
                                   now.getDate() - ((now.getDay() + 6) % 7))
             return monday
+        }
+
+        function defaultReminder() {
+            var next = new Date(Date.now() + 60 * 60 * 1000)
+            next.setMinutes(0)
+            next.setSeconds(0)
+            next.setMilliseconds(0)
+            return next
+        }
+
+        function clearReminder() {
+            reminderEnabled = false
+            hadReminder = false
+            reminderAt = defaultReminder()
+            reminderWeekdays = []
+            reminderPlaysSound = true
+            reminderIsImportant = false
+            repeatMode = "none"
+            reminderPicking = ""
+            reminderNudging = false
+        }
+
+        function setReminderFromRow(row) {
+            var parsed = row.reminderAt.length > 0 ? new Date(row.reminderAt) : null
+            hadReminder = parsed !== null && !isNaN(parsed.getTime())
+            reminderEnabled = hadReminder
+            reminderAt = hadReminder ? parsed : defaultReminder()
+            reminderWeekdays = page.unpackWeekdays(row.reminderRepeatWeekdays)
+            reminderPlaysSound = row.reminderPlaysSound !== false
+            reminderIsImportant = row.reminderIsImportant === true
+            repeatMode = repeatModeFor(reminderWeekdays)
+            reminderPicking = ""
+            reminderNudging = false
+        }
+
+        function shiftReminderMinutes(minutes) {
+            reminderAt = new Date(reminderAt.getTime() + minutes * 60 * 1000)
+        }
+
+        function startOfDay(date) {
+            return new Date(date.getFullYear(), date.getMonth(), date.getDate())
+        }
+
+        function daysFromToday(days) {
+            var date = new Date()
+            date.setDate(date.getDate() + days)
+            return date
+        }
+
+        function setReminderDate(date) {
+            reminderAt = new Date(date.getFullYear(), date.getMonth(), date.getDate(),
+                                  reminderAt.getHours(), reminderAt.getMinutes(), 0, 0)
+        }
+
+        function setReminderTime(hours, minutes) {
+            var next = new Date(reminderAt.getTime())
+            next.setHours(hours, minutes, 0, 0)
+            reminderAt = next
+        }
+
+        function dateIsDaysAway(days) {
+            return startOfDay(reminderAt).getTime()
+                === startOfDay(daysFromToday(days)).getTime()
+        }
+
+        function timeIs(hours, minutes) {
+            return reminderAt.getHours() === hours
+                && reminderAt.getMinutes() === minutes
+        }
+
+        function applyRepeatMode(mode) {
+            repeatMode = mode
+            if (mode === "none") reminderWeekdays = []
+            else if (mode === "daily") reminderWeekdays = [1, 2, 3, 4, 5, 6, 7]
+            else if (mode === "weekly") reminderWeekdays = [reminderAt.getDay() + 1]
+        }
+
+        function repeatModeFor(weekdays) {
+            if (!weekdays || weekdays.length === 0) return "none"
+            if (weekdays.length === 7) return "daily"
+            if (weekdays.length === 1) return "weekly"
+            return "custom"
+        }
+
+        function calendarCells() {
+            var year = calendarMonth.getFullYear()
+            var month = calendarMonth.getMonth()
+            var lead = (new Date(year, month, 1).getDay() + 6) % 7
+            var count = new Date(year, month + 1, 0).getDate()
+            var cells = []
+            for (var i = 0; i < lead; i++) cells.push(0)
+            for (var day = 1; day <= count; day++) cells.push(day)
+            while (cells.length % 7 !== 0) cells.push(0)
+            return cells
+        }
+
+        function shiftCalendarMonth(months) {
+            calendarMonth = new Date(calendarMonth.getFullYear(),
+                                     calendarMonth.getMonth() + months, 1)
+        }
+
+        function calendarDaySelected(day) {
+            return day > 0
+                && reminderAt.getDate() === day
+                && reminderAt.getMonth() === calendarMonth.getMonth()
+                && reminderAt.getFullYear() === calendarMonth.getFullYear()
+        }
+
+        function openCalendar() {
+            calendarMonth = new Date(reminderAt.getFullYear(),
+                                     reminderAt.getMonth(), 1)
+            reminderPicking = "date"
+        }
+
+        function pickCalendarDay(day) {
+            if (day <= 0) return
+            setReminderDate(new Date(calendarMonth.getFullYear(),
+                                     calendarMonth.getMonth(), day))
+            reminderPicking = ""
+        }
+
+        function toggleReminderWeekday(weekday) {
+            var next = reminderWeekdays.slice(0)
+            var index = next.indexOf(weekday)
+            if (index >= 0) next.splice(index, 1)
+            else next.push(weekday)
+            next.sort(function(a, b) { return a - b })
+            reminderWeekdays = next
+        }
+
+        function reminderPayload() {
+            return {
+                scheduledAt: reminderAt.toISOString(),
+                repeatWeekdays: reminderWeekdays,
+                timeZone: page.timeZone,
+                playsSound: reminderPlaysSound,
+                isImportant: reminderIsImportant,
+            }
         }
 
         readonly property string destination: {
@@ -1250,6 +1503,7 @@ Page {
             habitRequired = 1
             habitApprovals = 1
             habitAnchor = defaultAnchor()
+            clearReminder()
             visible = true
             if (kind === "todo") todoField.forceActiveFocus()
             else if (kind === "bookmark") bookmarkTitleField.forceActiveFocus()
@@ -1264,6 +1518,7 @@ Page {
             todoParentOverride = ""
             todoParentTitle = ""
             todoField.text = row.title
+            setReminderFromRow(row)
             visible = true
             todoField.forceActiveFocus()
         }
@@ -1276,6 +1531,7 @@ Page {
             todoParentOverride = row.itemId
             todoParentTitle = row.title
             todoField.text = ""
+            clearReminder()
             visible = true
             todoField.forceActiveFocus()
         }
@@ -1289,6 +1545,7 @@ Page {
             bookmarkIsFolder = row.isList === true
             bookmarkTitleField.text = row.title
             bookmarkUrlField.text = row.url || ""
+            setReminderFromRow(row)
             visible = true
             bookmarkTitleField.forceActiveFocus()
         }
@@ -1328,24 +1585,30 @@ Page {
             if (!canSubmit) return
             var spaceId = page.currentSpaceId()
             if (kind === "todo" && todoId.length > 0) {
-                page.updateTodo(spaceId, todoId, todoField.text.trim())
+                page.updateTodo(spaceId, todoId, todoField.text.trim(),
+                                reminderEnabled ? reminderPayload() : null,
+                                hadReminder && !reminderEnabled)
             } else if (kind === "todo") {
                 page.createTodo(spaceId, todoField.text.trim(),
                                 todoParentOverride.length > 0
                                     ? todoParentOverride
                                     : page.currentParentId(page.todoPath),
-                                todoAsList)
+                                todoAsList,
+                                reminderEnabled ? reminderPayload() : null)
             } else if (kind === "bookmark" && bookmarkId.length > 0) {
                 page.updateBookmark(spaceId, bookmarkId,
                                     bookmarkTitleField.text.trim(),
                                     bookmarkIsFolder ? "" : bookmarkUrlField.text.trim(),
-                                    bookmarkIsFolder)
+                                    bookmarkIsFolder,
+                                    reminderEnabled ? reminderPayload() : null,
+                                    hadReminder && !reminderEnabled)
             } else if (kind === "bookmark") {
                 page.createBookmark(spaceId,
                                     bookmarkTitleField.text.trim(),
                                     bookmarkIsFolder ? "" : bookmarkUrlField.text.trim(),
                                     bookmarkIsFolder,
-                                    page.currentParentId(page.bookmarkPath))
+                                    page.currentParentId(page.bookmarkPath),
+                                    reminderEnabled ? reminderPayload() : null)
             } else if (habitId.length > 0) {
                 page.updateHabit(spaceId, habitId, habitNameField.text.trim(),
                                  habitRequirement())
@@ -1359,6 +1622,7 @@ Page {
         MouseArea { anchors.fill: parent }
 
         ColumnLayout {
+            visible: newItemPanel.reminderPicking.length === 0
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
@@ -1463,6 +1727,231 @@ Page {
                     radius: 6
                 }
                 padding: 16
+            }
+
+            RowLayout {
+                visible: newItemPanel.kind === "todo"
+                         || newItemPanel.kind === "bookmark"
+                Layout.fillWidth: true
+                spacing: 20
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+                    Label {
+                        text: "Reminder on your phone"
+                        font.pixelSize: 30
+                        font.bold: true
+                        color: "black"
+                    }
+                    Label {
+                        text: "Saver sends this reminder to your signed-in phone."
+                        font.pixelSize: 23
+                        color: "black"
+                        opacity: 0.6
+                    }
+                }
+
+                ReminderOptionButton {
+                    Layout.preferredWidth: 150
+                    Layout.fillWidth: false
+                    labelText: newItemPanel.reminderEnabled ? "On" : "Off"
+                    selected: newItemPanel.reminderEnabled
+                    onClicked: {
+                        newItemPanel.reminderEnabled = !newItemPanel.reminderEnabled
+                        if (newItemPanel.reminderEnabled
+                                && newItemPanel.reminderAt <= new Date())
+                            newItemPanel.reminderAt = newItemPanel.defaultReminder()
+                    }
+                }
+            }
+
+            RowLayout {
+                visible: newItemPanel.reminderSection
+                Layout.fillWidth: true
+                spacing: 20
+
+                PanelLabel {
+                    text: "DATE"
+                    opacity: 1.0
+                }
+                Item { Layout.fillWidth: true }
+                Label {
+                    text: Qt.formatDate(newItemPanel.reminderAt, "ddd d MMM yyyy")
+                    font.pixelSize: 29
+                    font.bold: true
+                    color: "black"
+                }
+            }
+
+            RowLayout {
+                visible: newItemPanel.reminderSection
+                Layout.fillWidth: true
+                spacing: 16
+
+                PresetButton {
+                    labelText: "Today"
+                    selected: newItemPanel.dateIsDaysAway(0)
+                    onClicked: newItemPanel.setReminderDate(newItemPanel.daysFromToday(0))
+                }
+                PresetButton {
+                    labelText: "Tomorrow"
+                    selected: newItemPanel.dateIsDaysAway(1)
+                    onClicked: newItemPanel.setReminderDate(newItemPanel.daysFromToday(1))
+                }
+                PresetButton {
+                    labelText: "In 1 week"
+                    selected: newItemPanel.dateIsDaysAway(7)
+                    onClicked: newItemPanel.setReminderDate(newItemPanel.daysFromToday(7))
+                }
+                PresetButton {
+                    labelText: "Pick date..."
+                    onClicked: newItemPanel.openCalendar()
+                }
+            }
+
+            RowLayout {
+                visible: newItemPanel.reminderSection
+                Layout.fillWidth: true
+                spacing: 20
+
+                PanelLabel {
+                    text: "TIME"
+                    opacity: 1.0
+                }
+                Item { Layout.fillWidth: true }
+                Label {
+                    text: Qt.formatTime(newItemPanel.reminderAt, "hh:mm")
+                    font.pixelSize: 36
+                    font.bold: true
+                    color: "black"
+                }
+            }
+
+            RowLayout {
+                visible: newItemPanel.reminderSection
+                Layout.fillWidth: true
+                spacing: 16
+
+                PresetButton {
+                    labelText: "Morning"
+                    selected: newItemPanel.timeIs(8, 0)
+                    onClicked: newItemPanel.setReminderTime(8, 0)
+                }
+                PresetButton {
+                    labelText: "12:00"
+                    selected: newItemPanel.timeIs(12, 0)
+                    onClicked: newItemPanel.setReminderTime(12, 0)
+                }
+                PresetButton {
+                    labelText: "18:00"
+                    selected: newItemPanel.timeIs(18, 0)
+                    onClicked: newItemPanel.setReminderTime(18, 0)
+                }
+                PresetButton {
+                    labelText: "Pick time..."
+                    selected: newItemPanel.reminderNudging
+                    onClicked: newItemPanel.reminderNudging = !newItemPanel.reminderNudging
+                }
+            }
+
+            RowLayout {
+                visible: newItemPanel.reminderSection && newItemPanel.reminderNudging
+                Layout.fillWidth: true
+                spacing: 16
+
+                PresetButton {
+                    labelText: "-1h"
+                    onClicked: newItemPanel.shiftReminderMinutes(-60)
+                }
+                PresetButton {
+                    labelText: "-15m"
+                    onClicked: newItemPanel.shiftReminderMinutes(-15)
+                }
+                PresetButton {
+                    labelText: "+15m"
+                    onClicked: newItemPanel.shiftReminderMinutes(15)
+                }
+                PresetButton {
+                    labelText: "+1h"
+                    onClicked: newItemPanel.shiftReminderMinutes(60)
+                }
+            }
+
+            PanelLabel {
+                text: "REPEAT"
+                opacity: 1.0
+                visible: newItemPanel.reminderSection
+            }
+
+            RowLayout {
+                visible: newItemPanel.reminderSection
+                Layout.fillWidth: true
+                spacing: 16
+
+                PresetButton {
+                    labelText: "None"
+                    selected: newItemPanel.repeatMode === "none"
+                    onClicked: newItemPanel.applyRepeatMode("none")
+                }
+                PresetButton {
+                    labelText: "Daily"
+                    selected: newItemPanel.repeatMode === "daily"
+                    onClicked: newItemPanel.applyRepeatMode("daily")
+                }
+                PresetButton {
+                    labelText: "Weekly"
+                    selected: newItemPanel.repeatMode === "weekly"
+                    onClicked: newItemPanel.applyRepeatMode("weekly")
+                }
+                PresetButton {
+                    labelText: "Custom..."
+                    selected: newItemPanel.repeatMode === "custom"
+                    onClicked: newItemPanel.applyRepeatMode("custom")
+                }
+            }
+
+            RowLayout {
+                visible: newItemPanel.reminderSection
+                         && (newItemPanel.repeatMode === "weekly"
+                             || newItemPanel.repeatMode === "custom")
+                Layout.fillWidth: true
+                spacing: 10
+
+                Repeater {
+                    model: ["S", "M", "T", "W", "T", "F", "S"]
+                    delegate: ReminderOptionButton {
+                        required property int index
+                        required property string modelData
+                        Layout.preferredWidth: 96
+                        labelText: modelData
+                        selected: newItemPanel.reminderWeekdays.indexOf(index + 1) >= 0
+                        onClicked: {
+                            newItemPanel.toggleReminderWeekday(index + 1)
+                            newItemPanel.repeatMode =
+                                newItemPanel.repeatModeFor(newItemPanel.reminderWeekdays)
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                visible: newItemPanel.reminderSection
+                Layout.fillWidth: true
+                spacing: 16
+
+                ReminderOptionButton {
+                    labelText: newItemPanel.reminderPlaysSound ? "Sound on" : "Silent"
+                    selected: newItemPanel.reminderPlaysSound
+                    onClicked: newItemPanel.reminderPlaysSound =
+                               !newItemPanel.reminderPlaysSound
+                }
+                ReminderOptionButton {
+                    labelText: "Time-sensitive"
+                    selected: newItemPanel.reminderIsImportant
+                    onClicked: newItemPanel.reminderIsImportant =
+                               !newItemPanel.reminderIsImportant
+                }
             }
 
             PanelLabel {
@@ -1586,6 +2075,108 @@ Page {
                         color: "white"
                         border.color: "black"
                         border.width: 3
+                        radius: 6
+                    }
+                    padding: 20
+                }
+            }
+        }
+
+        ColumnLayout {
+            visible: newItemPanel.reminderPicking === "date"
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 56
+            spacing: 24
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 20
+
+                EditButton {
+                    contentItem: Text {
+                        text: "\u2039"
+                        font.pixelSize: 44
+                        color: "black"
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    onClicked: newItemPanel.shiftCalendarMonth(-1)
+                }
+
+                Label {
+                    Layout.fillWidth: true
+                    text: Qt.formatDate(newItemPanel.calendarMonth, "MMMM yyyy")
+                    font.pixelSize: 34
+                    font.bold: true
+                    color: "black"
+                    horizontalAlignment: Text.AlignHCenter
+                }
+
+                EditButton {
+                    contentItem: Text {
+                        text: "\u203a"
+                        font.pixelSize: 44
+                        color: "black"
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    onClicked: newItemPanel.shiftCalendarMonth(1)
+                }
+            }
+
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 7
+                columnSpacing: 10
+                rowSpacing: 10
+
+                Repeater {
+                    model: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                    delegate: Label {
+                        required property string modelData
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 100
+                        text: modelData
+                        font.pixelSize: 24
+                        color: "black"
+                        opacity: 0.6
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                }
+
+                Repeater {
+                    model: newItemPanel.calendarCells()
+                    delegate: CalendarDay {
+                        required property int modelData
+                        day: modelData
+                        selected: newItemPanel.calendarDaySelected(modelData)
+                        onClicked: newItemPanel.pickCalendarDay(modelData)
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: 12
+                spacing: 16
+
+                Item { Layout.fillWidth: true }
+
+                Button {
+                    onClicked: newItemPanel.reminderPicking = ""
+                    contentItem: Text {
+                        text: "Back"
+                        font.pixelSize: 28
+                        color: "black"
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        color: "white"
+                        border.color: "black"
+                        border.width: 2
                         radius: 6
                     }
                     padding: 20

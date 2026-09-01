@@ -3,6 +3,7 @@ mod appload;
 mod backend;
 mod capture;
 mod config;
+mod http;
 mod models;
 mod pairing;
 

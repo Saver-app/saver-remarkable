@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use crate::api::SaverClient;
+use crate::backend::local_time_zone;
 use crate::config::Config;
 
 pub fn run(command: &str, payload: Option<&str>) -> Result<()> {
@@ -25,6 +26,7 @@ fn capture_config() -> Result<Value> {
         "notebookDefaultSpaceName": config.notebook_default_space_name,
         "notebookDefaultListId": config.notebook_default_list_id,
         "notebookDefaultListName": config.notebook_default_list_name,
+        "timeZone": local_time_zone(),
     }))
 }
 

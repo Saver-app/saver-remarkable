@@ -1,23 +1,9 @@
-use std::time::Duration;
-
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::models::{HabitRequirement, Space};
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-
-fn network_error_message(err: &reqwest::Error) -> String {
-    if err.is_timeout() {
-        "Saver took too long to respond. Check your Wi-Fi and try again.".to_string()
-    } else if err.is_connect() {
-        "Could not reach Saver. Check your Wi-Fi and try again.".to_string()
-    } else {
-        format!("Could not reach Saver: {err}")
-    }
-}
+use crate::http::{self, Retry};
+use crate::models::{HabitRequirement, ReminderSettings, Space};
 
 pub struct SaverClient {
     http: reqwest::blocking::Client,
@@ -37,44 +23,22 @@ struct CreateTodoResponse {
     id: String,
 }
 
-#[derive(Deserialize)]
-struct ErrorResponse {
-    error: String,
-}
-
 impl SaverClient {
     pub fn new(base_url: impl Into<String>, device_token: impl Into<String>) -> Self {
         Self {
-            http: reqwest::blocking::Client::builder()
-                .connect_timeout(CONNECT_TIMEOUT)
-                .timeout(REQUEST_TIMEOUT)
-                .build()
-                .expect("building the Saver API HTTP client"),
+            http: http::blocking_client(),
             base_url: base_url.into(),
             device_token: device_token.into(),
         }
     }
 
     pub(crate) fn call(&self, body: serde_json::Value) -> Result<serde_json::Value> {
-        let response = self
-            .http
-            .post(&self.base_url)
-            .bearer_auth(&self.device_token)
-            .json(&body)
-            .send()
-            .map_err(|err| anyhow::anyhow!(network_error_message(&err)))?;
-
-        let status = response.status();
-        let text = response.text().context("reading response body")?;
-
-        if !status.is_success() {
-            let message = serde_json::from_str::<ErrorResponse>(&text)
-                .map(|e| e.error)
-                .unwrap_or(text);
-            bail!("Saver API error ({status}): {message}");
-        }
-
-        serde_json::from_str(&text).context("parsing response body")
+        http::send_json("Saver API error", Retry::OnColdStart, || {
+            self.http
+                .post(&self.base_url)
+                .bearer_auth(&self.device_token)
+                .json(&body)
+        })
     }
 
     pub fn list_items(&self) -> Result<ItemsListing> {
@@ -169,12 +133,21 @@ impl SaverClient {
         Ok(())
     }
 
-    pub fn update_todo(&self, space_id: &str, todo_id: &str, text: &str) -> Result<()> {
+    pub fn update_todo(
+        &self,
+        space_id: &str,
+        todo_id: &str,
+        text: &str,
+        reminder: Option<&ReminderSettings>,
+        remove_reminder: bool,
+    ) -> Result<()> {
         self.call(json!({
             "op": "updateTodo",
             "spaceId": space_id,
             "todoId": todo_id,
             "text": text,
+            "reminder": reminder,
+            "removeReminder": remove_reminder,
         }))?;
         Ok(())
     }
@@ -186,6 +159,8 @@ impl SaverClient {
         title: &str,
         url: &str,
         is_list: bool,
+        reminder: Option<&ReminderSettings>,
+        remove_reminder: bool,
     ) -> Result<()> {
         self.call(json!({
             "op": "updateBookmark",
@@ -194,6 +169,8 @@ impl SaverClient {
             "title": title,
             "url": url,
             "isList": is_list,
+            "reminder": reminder,
+            "removeReminder": remove_reminder,
         }))?;
         Ok(())
     }

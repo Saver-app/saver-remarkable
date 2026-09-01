@@ -73,7 +73,7 @@ matching `deviceCode`, which never leaves the tablet. Pairings expire after
 3. Every device request sends `Authorization: Bearer <token>`. The API
    hashes the incoming token and looks up the owning user by that hash: an
    O(1) lookup, no query needed, since the hash is the record's key.
-4. Revoking (`revokeRemarkableToken`) deletes that record; the next device
+4. Revoking (`revokeRemarkableToken`) deletes that record. The next device
    request then gets `401`.
 
 The token record is readable by its owning user for the settings-page token
@@ -108,7 +108,7 @@ unchanged from the main app's schema (`flutter-app/lib/services/`):
 }
 ```
 
-Bookmarks add `title`/`url` in place of `text`/`isDone`; habits carry a
+Bookmarks add `title`/`url` in place of `text`/`isDone`. Habits carry a
 `requirementMode` (`everyday` or a windowed count), a `streak`, and
 per-day/per-window completion counts. `src/models.rs` mirrors all three.
 
@@ -138,9 +138,9 @@ Content-Type: application/json
 | `setTodoDone` | Toggle a todo's done state. |
 | `setHabitCount` | Log today's count for a habit. |
 
-`createTodo`/`updateTodo` and friends return `{ "id": "..." }` on create;
+`createTodo`/`updateTodo` and friends return `{ "id": "..." }` on create.
 mutations return `{ "ok": true }` (see `src/api.rs` for exact request
-shapes; they line up one-to-one with `SaverClient`'s methods). Non-2xx
+shapes, which line up one-to-one with `SaverClient`'s methods). Non-2xx
 responses are `{ "error": "<message>" }`: `401` means the token is
 missing/invalid/revoked, `403` means the token's user isn't a member of the
 given `spaceId`, `400` means a malformed request.
@@ -162,6 +162,14 @@ in Rust and neither is handed to xochitl's QML. The command executor starts
 that process with a minimal environment, so point this path at another
 backend through `api_base_url` in `config.toml`: `SAVER_API_BASE_URL` and
 `SAVER_DEVICE_TOKEN` only reach the backend that AppLoad launches.
+
+`--capture-config` also reports the tablet's IANA zone, from the same probe
+`MSG_GET_CONFIG` uses, because a reminder set in the capture dialog has to be
+stamped with a zone and xochitl's QML has no reliable way to name one.
+`createTodoFromNotebook` only creates, so a reminder is a second request:
+the dialog chains `updateTodo` onto the id the create returned. That call
+cannot be started from inside the command executor's own `runningChanged`
+handler, so the patch queues it on a short timer.
 
 ## Pairing protocol (`remarkablePairing`)
 
@@ -203,12 +211,16 @@ A mismatched `deviceCode` is `403`. Poll at the advertised `interval`.
 xovi and AppLoad are third-party, community-built tools, not made or
 supported by reMarkable. AppLoad's own version is 0.5.3 as tested here.
 
-Confirmed working on a reMarkable Paper Pro ("ferrari", aarch64) running OS
-3.27.3.0, and on a reMarkable 2 (armv7). The Paper Pro Move shares the
-aarch64 build and is a supported xovi/Vellum target (`rmppm`, distinct from
-the Paper Pro's `rmpp`), so it should work, but sharing an architecture
-doesn't guarantee identical runtime or UI behaviour; the reMarkable 1 shares
-the armv7 build with the reMarkable 2. Neither has actually been tested.
+Confirmed working on a reMarkable Paper Pro ("ferrari", aarch64) and a
+reMarkable 2 (armv7) running OS 3.27.3.0. The QML patches applied on the rM2
+without qmldiff errors. The core app was also tested on the rM2 with OS
+3.25.0.142 and 3.26.0.68. The reMarkable 1 shares the armv7 build and
+1404 x 1872 display with the reMarkable 2. Paper Pure is a supported
+xovi/Vellum aarch64 target (`rmppure`) with the same display dimensions. Both
+are core-package-compatible on that basis, but neither has actually been
+tested, and their capture bindings remain unverified. The Paper Pro Move also
+shares the aarch64 build, but remains excluded because its different display
+dimensions may expose UI issues.
 
 ### App layout
 
@@ -218,7 +230,7 @@ AppLoad discovers apps as directories under
 ```
 manifest.json      { id, name, loadsBackend, entry, supportsScaling, canHaveMultipleFrontends }
 icon.png           100x100 RGBA
-resources.rcc      Qt binary resource bundle; `entry` resolves inside it
+resources.rcc      Qt binary resource bundle where `entry` resolves
 backend/entry      native executable, launched with the socket path as argv[1]
 ```
 
@@ -240,7 +252,7 @@ AppLoad creates a `SOCK_SEQPACKET` unix socket at
 `/tmp/<id>.sock`, then spawns `backend/entry <socket-path>`. Each message is
 two datagrams: an 8-byte native-endian header (`msg_type: u32,
 length: u32`) followed by a `length`-byte UTF-8 payload. `0xFFFFFFFF` is
-terminate and `0xFFFFFFFE` is "frontend (re)attached"; all other numbers are
+terminate and `0xFFFFFFFE` is "frontend (re)attached". All other numbers are
 app-defined, see the REST protocol section above for what `saver-remarkable`
 actually sends. The QML side uses `AppLoad { applicationID }` from
 `net.asivery.AppLoad 1.0`, with `sendMessage(type, text)` and
@@ -253,7 +265,7 @@ datagram stays queued, and the *next* header `recv` consumes it and returns
 AppLoad tears the app down a beat after its first reply, which presents as
 "the app opens, flashes its first screen, and closes". Always perform the
 payload `recv`, even for `length == 0`, regardless of whether the error
-check that follows it is conditional. This cost most of a day; don't
+check that follows it is conditional. This cost most of a day. Do not
 re-introduce it.
 
 Because the app dies with its backend process, any backend crash or early
@@ -278,7 +290,7 @@ To confirm a QML patch landed:
 ssh root@TABLET "journalctl -u xochitl --no-pager | grep qmldiff | tail -20"
 ```
 
-`Configured hashtab rules.` means the rules file parsed; a `Processing file
+`Configured hashtab rules.` means the rules file parsed. A `Processing file
 <path>` line means the rules were applied to that file. A parse error drops
 every rule in the file, so a single bad line anywhere makes the
 selection-menu button vanish rather than misbehave: see the header of
@@ -308,13 +320,57 @@ row-major run of `'1'`/`'0'`, and `qml/PairingPage.qml` paints it onto a
 `Canvas`. This avoids both an image encoder in the backend and any
 dependency on an SVG/image plugin being present in xochitl's QML runtime.
 
+## Packaging
+
+Vellum is apk-based, so `packaging/vellum/VELBUILD` is an `APKBUILD`-shaped
+recipe. It builds two packages from one source tarball, both published to
+Vellum's stable repository as of 0.1.1:
+
+| Package | Contents | Extra dependencies |
+| --- | --- | --- |
+| `saver-remarkable` | `manifest.json`, `icon.png`, `resources.rcc`, `backend/entry` | `appload>=0.5.3` |
+| `saver-remarkable-capture` | `saver-sidebar.qmd`, `saver-selection.qmd` | matching `saver-remarkable` version/revision, `qt-resource-rebuilder`, `qt-command-executor`, `remarkable-os>=3.26`, `remarkable-os<3.28` |
+
+The split exists because the QML patches are firmware-specific and collide
+with other mods, while the core app is neither. `saver-remarkable-capture`
+declares `!convert-to-text-remover` and `!retaskable-capture`, so apk refuses
+the combination up front instead of letting someone install two mods that
+patch the same selection menu, and its `remarkable-os` bounds keep it off
+firmware whose private xochitl paths, anchors, and handwriting APIs have not
+been checked. The upper bound is a guard for unverified releases rather than a
+known break at 3.28. Device support for the core package does not imply capture
+support. The capture bindings still need verification on each model. The core
+package carries
+`!rmppm`, which keeps it off Paper Pro Move until its different display
+dimensions have been tested. reMarkable 1 and Paper Pure are allowed because
+their architecture and display dimensions match existing supported builds.
+
+The capture subpackage pins `saver-remarkable=$pkgver-r$pkgrel` because its QML
+patches invoke the core binary's `--capture-config` and `--capture-api` CLI
+contract. This prevents apk from combining capture with a different core
+release.
+
+`package()` installs to exactly the paths `install-device.sh` writes, so a
+package install and a source install produce the same on-device layout and
+can replace each other. Only the source path has a `SKIP_QMLDIFF` equivalent.
+with packages, the patches are present iff `saver-remarkable-capture` is.
+
+`postdeinstall` deletes `/home/root/.config/saver-remarkable` only when
+`VELLUM_PURGE=1`, so `vellum del` leaves a device paired while
+`vellum purge` unlinks it locally. Neither revokes the token server-side.
+
+Cutting a release means tagging `vX.Y.Z`, setting `pkgver` to match,
+refreshing `sha512sums` against that tag's GitHub tarball, and submitting the
+recipe to Vellum's package repository. `pkgrel` resets to 0 with a new
+`pkgver` and increments for a packaging-only rebuild. The tarball checksum is
+over the *tag*, so re-tagging an already-published version invalidates it,
+which is why 0.1.1 needed a second checksum commit.
+
 ## Still to do
 
-- Submitting the Vellum package: `packaging/vellum/VELBUILD` is in the
-  correct `APKBUILD`-shaped format, but needs a `v0.1.0` Git tag before it
-  has a source tarball to build from, and has to reach Vellum's testing or
-  stable repo before anyone can install it. See `packaging/README.md`.
-- Confirming the Paper Pro Move and reMarkable 1 actually run the app, not
-  just that they share a build target with a device that does.
+- Confirming reMarkable 1 and Paper Pure actually run the app, not just that
+  they match an existing build target and display size.
+- Adapting and testing the UI on Paper Pro Move. Until then the package
+  excludes it, so that device needs a source build.
 - The tablet needs Wi-Fi: the USB link (10.11.99.1) carries no default
   route, so pairing can't reach the backend over USB alone.
