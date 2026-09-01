@@ -8,7 +8,7 @@ pkgdesc="Saver client for todos, bookmarks, and habits on reMarkable tablets"
 url="https://github.com/$upstream_author/saver-remarkable"
 arch="aarch64 armv7"
 license="MIT"
-depends="appload>=0.5.3 !rm1 !rmppm !rmppure"
+depends="appload>=0.5.3 !rmppm"
 subpackages="saver-remarkable-capture:capture"
 readmeurl="https://raw.githubusercontent.com/$upstream_author/saver-remarkable/v$pkgver/README.md"
 
@@ -65,7 +65,7 @@ capture() {
 	category="ui"
 	pkgdesc="Saver sidebar entry and handwriting-to-todo capture"
 	depends="
-	saver-remarkable
+	saver-remarkable=$pkgver-r$pkgrel
 	qt-resource-rebuilder
 	qt-command-executor
 	!convert-to-text-remover
