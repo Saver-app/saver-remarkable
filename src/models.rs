@@ -1,6 +1,28 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReminderSettings {
+    #[serde(rename = "scheduledAt")]
+    pub scheduled_at: String,
+    #[serde(rename = "repeatWeekdays", default)]
+    pub repeat_weekdays: Vec<u8>,
+    #[serde(rename = "timeZone", default = "default_time_zone")]
+    pub time_zone: String,
+    #[serde(rename = "playsSound", default = "default_true")]
+    pub plays_sound: bool,
+    #[serde(rename = "isImportant", default)]
+    pub is_important: bool,
+}
+
+fn default_time_zone() -> String {
+    "UTC".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Todo {
     pub id: String,
     pub text: String,
@@ -14,6 +36,16 @@ pub struct Todo {
     pub parent_id: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: Option<String>,
+    #[serde(rename = "reminderAt", default)]
+    pub reminder_at: Option<String>,
+    #[serde(rename = "reminderRepeatWeekdays", default)]
+    pub reminder_repeat_weekdays: Vec<u8>,
+    #[serde(rename = "reminderTimeZone", default = "default_time_zone")]
+    pub reminder_time_zone: String,
+    #[serde(rename = "reminderPlaysSound", default = "default_true")]
+    pub reminder_plays_sound: bool,
+    #[serde(rename = "reminderIsImportant", default)]
+    pub reminder_is_important: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +59,16 @@ pub struct Bookmark {
     pub parent_id: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: Option<String>,
+    #[serde(rename = "reminderAt", default)]
+    pub reminder_at: Option<String>,
+    #[serde(rename = "reminderRepeatWeekdays", default)]
+    pub reminder_repeat_weekdays: Vec<u8>,
+    #[serde(rename = "reminderTimeZone", default = "default_time_zone")]
+    pub reminder_time_zone: String,
+    #[serde(rename = "reminderPlaysSound", default = "default_true")]
+    pub reminder_plays_sound: bool,
+    #[serde(rename = "reminderIsImportant", default)]
+    pub reminder_is_important: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

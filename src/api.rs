@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::http::{self, Retry};
-use crate::models::{HabitRequirement, Space};
+use crate::models::{HabitRequirement, ReminderSettings, Space};
 
 pub struct SaverClient {
     http: reqwest::blocking::Client,
@@ -133,12 +133,21 @@ impl SaverClient {
         Ok(())
     }
 
-    pub fn update_todo(&self, space_id: &str, todo_id: &str, text: &str) -> Result<()> {
+    pub fn update_todo(
+        &self,
+        space_id: &str,
+        todo_id: &str,
+        text: &str,
+        reminder: Option<&ReminderSettings>,
+        remove_reminder: bool,
+    ) -> Result<()> {
         self.call(json!({
             "op": "updateTodo",
             "spaceId": space_id,
             "todoId": todo_id,
             "text": text,
+            "reminder": reminder,
+            "removeReminder": remove_reminder,
         }))?;
         Ok(())
     }
@@ -150,6 +159,8 @@ impl SaverClient {
         title: &str,
         url: &str,
         is_list: bool,
+        reminder: Option<&ReminderSettings>,
+        remove_reminder: bool,
     ) -> Result<()> {
         self.call(json!({
             "op": "updateBookmark",
@@ -158,6 +169,8 @@ impl SaverClient {
             "title": title,
             "url": url,
             "isList": is_list,
+            "reminder": reminder,
+            "removeReminder": remove_reminder,
         }))?;
         Ok(())
     }

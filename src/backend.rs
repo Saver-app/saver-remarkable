@@ -5,7 +5,7 @@ use serde_json::json;
 use crate::api::SaverClient;
 use crate::appload::{AppLoadSocket, Message, MSG_SYSTEM_NEW_COORDINATOR, MSG_SYSTEM_TERMINATE};
 use crate::config::Config;
-use crate::models::HabitRequirement;
+use crate::models::{HabitRequirement, ReminderSettings};
 use crate::pairing::{qr_matrix, PairingClient, PairingStart, PairingStatus};
 
 pub const MSG_GET_CONFIG: u32 = 1001;
@@ -45,6 +45,48 @@ pub struct Backend {
     pairing: Option<PairingStart>,
 }
 
+pub(crate) fn local_time_zone() -> String {
+    if let Ok(zone) = std::env::var("TZ") {
+        let zone = zone.trim();
+        if !zone.is_empty() {
+            return zone.to_string();
+        }
+    }
+    if let Ok(zone) = std::fs::read_to_string("/etc/timezone") {
+        let zone = zone.trim();
+        if !zone.is_empty() {
+            return zone.to_string();
+        }
+    }
+    if let Ok(path) = std::fs::read_link("/etc/localtime") {
+        if let Some(path) = path.to_str() {
+            if let Some((_, zone)) = path.split_once("zoneinfo/") {
+                if !zone.is_empty() {
+                    return zone.to_string();
+                }
+            }
+        }
+    }
+    "UTC".to_string()
+}
+
+fn created_with_reminder(
+    id: String,
+    reminder: Option<&ReminderSettings>,
+    apply: impl FnOnce(&str, &ReminderSettings) -> Result<()>,
+) -> serde_json::Value {
+    let Some(reminder) = reminder else {
+        return json!({ "id": id });
+    };
+    match apply(&id, reminder) {
+        Ok(()) => json!({ "id": id }),
+        Err(err) => json!({
+            "id": id,
+            "error": format!("Saved, but the reminder could not be set: {err}"),
+        }),
+    }
+}
+
 #[derive(Serialize)]
 struct ConfigPayload {
     #[serde(rename = "hasToken")]
@@ -63,6 +105,8 @@ struct ConfigPayload {
     notebook_default_list_name: Option<String>,
     #[serde(rename = "showInSidebar")]
     show_in_sidebar: bool,
+    #[serde(rename = "timeZone")]
+    time_zone: String,
 }
 
 #[derive(Deserialize)]
@@ -96,6 +140,7 @@ struct CreateTodoRequest {
     parent_id: Option<String>,
     #[serde(rename = "isList", default)]
     is_list: bool,
+    reminder: Option<ReminderSettings>,
 }
 
 #[derive(Deserialize)]
@@ -109,6 +154,7 @@ struct CreateBookmarkRequest {
     is_list: bool,
     #[serde(rename = "parentId")]
     parent_id: Option<String>,
+    reminder: Option<ReminderSettings>,
 }
 
 #[derive(Deserialize)]
@@ -153,6 +199,9 @@ struct UpdateTodoRequest {
     #[serde(rename = "todoId")]
     todo_id: String,
     text: String,
+    reminder: Option<ReminderSettings>,
+    #[serde(rename = "removeReminder", default)]
+    remove_reminder: bool,
 }
 
 #[derive(Deserialize)]
@@ -166,6 +215,9 @@ struct UpdateBookmarkRequest {
     url: String,
     #[serde(rename = "isList", default)]
     is_list: bool,
+    reminder: Option<ReminderSettings>,
+    #[serde(rename = "removeReminder", default)]
+    remove_reminder: bool,
 }
 
 #[derive(Deserialize)]
@@ -214,6 +266,7 @@ impl Backend {
                     notebook_default_list_id: self.config.notebook_default_list_id.clone(),
                     notebook_default_list_name: self.config.notebook_default_list_name.clone(),
                     show_in_sidebar: self.config.show_in_sidebar(),
+                    time_zone: local_time_zone(),
                 };
                 socket.send(MSG_GET_CONFIG_RESPONSE, &json!(payload).to_string())?;
             }
@@ -299,7 +352,19 @@ impl Backend {
                                 req.parent_id.as_deref(),
                                 req.is_list,
                             ) {
-                                Ok(id) => json!({ "id": id }),
+                                Ok(id) => created_with_reminder(
+                                    id,
+                                    req.reminder.as_ref(),
+                                    |id, reminder| {
+                                        client.update_todo(
+                                            &req.space_id,
+                                            id,
+                                            &req.text,
+                                            Some(reminder),
+                                            false,
+                                        )
+                                    },
+                                ),
                                 Err(err) => json!({ "error": err.to_string() }),
                             }
                         }
@@ -319,7 +384,19 @@ impl Backend {
                             req.is_list,
                             req.parent_id.as_deref(),
                         ) {
-                            Ok(id) => json!({ "id": id }),
+                            Ok(id) => {
+                                created_with_reminder(id, req.reminder.as_ref(), |id, reminder| {
+                                    client.update_bookmark(
+                                        &req.space_id,
+                                        id,
+                                        &req.title,
+                                        &req.url,
+                                        req.is_list,
+                                        Some(reminder),
+                                        false,
+                                    )
+                                })
+                            }
                             Err(err) => json!({ "error": err.to_string() }),
                         },
                         Err(err) => json!({ "error": err.to_string() }),
@@ -365,7 +442,13 @@ impl Backend {
                 let response = match serde_json::from_str::<UpdateTodoRequest>(&msg.contents) {
                     Ok(req) => match self.client() {
                         Ok(client) => {
-                            match client.update_todo(&req.space_id, &req.todo_id, &req.text) {
+                            match client.update_todo(
+                                &req.space_id,
+                                &req.todo_id,
+                                &req.text,
+                                req.reminder.as_ref(),
+                                req.remove_reminder,
+                            ) {
                                 Ok(()) => json!({ "ok": true }),
                                 Err(err) => json!({ "error": err.to_string() }),
                             }
@@ -385,6 +468,8 @@ impl Backend {
                             &req.title,
                             &req.url,
                             req.is_list,
+                            req.reminder.as_ref(),
+                            req.remove_reminder,
                         ) {
                             Ok(()) => json!({ "ok": true }),
                             Err(err) => json!({ "error": err.to_string() }),
