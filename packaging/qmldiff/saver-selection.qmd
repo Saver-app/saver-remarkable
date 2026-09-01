@@ -19,6 +19,28 @@ AFFECT /qml/common/SceneSelectionHandler.qml
             property string commandOutput: ""
             property bool commandTimedOut: false
 
+            property string timeZone: "UTC"
+
+            property string queuedOperation: ""
+            property var queuedArguments: []
+            property var queuedContext: ({})
+
+            // Defer chained requests until runningChanged returns.
+            Timer {
+                id: saverQueuedCommand
+                interval: 50
+                repeat: false
+                onTriggered: {
+                    var operation = saverSend.queuedOperation;
+                    var args = saverSend.queuedArguments;
+                    var context = saverSend.queuedContext;
+                    saverSend.queuedOperation = "";
+                    saverSend.queuedArguments = [];
+                    saverSend.queuedContext = {};
+                    saverSend.runCommand(operation, args, context);
+                }
+            }
+
             Timer {
                 id: saverRequestWatchdog
                 interval: 20000
@@ -255,6 +277,7 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                         console.log("SAVER: no device token available to capture backend");
                         return;
                     }
+                    saverSend.timeZone = response.timeZone || "UTC";
                     var defaultSpaceId = response.notebookDefaultSpaceId || "";
                     var defaultListId = defaultSpaceId.length > 0
                         ? (response.notebookDefaultListId || "") : "";
@@ -285,13 +308,14 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                             saverToast.show("No Saver space to save to", false);
                             return;
                         }
-                        saverSend.postTodo(context.text, target.spaceId, target.listId);
+                        saverSend.postTodo(context.text, target.spaceId, target.listId, null);
                         return;
                     }
                     saverToast.show("", false);
                     saverConfirm.openFor(context.text, response.spaces || [],
                                          response.activeSpaceId || "",
-                                         context.defaultSpaceId, context.defaultListId);
+                                         context.defaultSpaceId, context.defaultListId,
+                                         saverSend.timeZone);
                     return;
                 }
 
@@ -299,8 +323,38 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                     console.log("SAVER: createTodoFromNotebook ->", JSON.stringify(response));
                     if (response.error) {
                         saverToast.show(response.error, false);
-                    } else {
+                        return;
+                    }
+                    if (!context.reminder) {
                         saverToast.show("Added to Saver: " + saverToast.shorten(context.text), false);
+                        return;
+                    }
+                    if (!response.id || context.spaceId.length === 0) {
+                        console.log("SAVER: cannot attach a reminder without an id and a space");
+                        saverToast.show("Added to Saver, but the reminder could not be set", false);
+                        return;
+                    }
+                    saverToast.show("Setting the reminder...", true);
+                    saverSend.queueCommand("remind",
+                                           ["--capture-api", JSON.stringify({
+                                               op: "updateTodo",
+                                               spaceId: context.spaceId,
+                                               todoId: response.id,
+                                               text: context.text,
+                                               reminder: context.reminder,
+                                               removeReminder: false,
+                                           })],
+                                           { text: context.text });
+                    return;
+                }
+
+                if (operation === "remind") {
+                    console.log("SAVER: updateTodo (reminder) ->", JSON.stringify(response));
+                    if (response.error) {
+                        saverToast.show("Added to Saver, but the reminder could not be set", false);
+                    } else {
+                        saverToast.show("Added with a reminder: "
+                                        + saverToast.shorten(context.text), false);
                     }
                 }
             }
@@ -355,7 +409,14 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                          listId: listId, listName: listName };
             }
 
-            function postTodo(text, spaceId, parentId) {
+            function queueCommand(operation, args, context) {
+                saverSend.queuedOperation = operation;
+                saverSend.queuedArguments = args;
+                saverSend.queuedContext = context || {};
+                saverQueuedCommand.restart();
+            }
+
+            function postTodo(text, spaceId, parentId, reminder) {
                 var body = { op: "createTodoFromNotebook", text: text };
                 if (spaceId.length > 0) {
                     body.spaceId = spaceId;
@@ -365,7 +426,8 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                 }
 
                 saverSend.runCommand("create", ["--capture-api", JSON.stringify(body)],
-                                     { text: text });
+                                     { text: text, spaceId: spaceId,
+                                       reminder: reminder || null });
             }
         }
         }
@@ -451,11 +513,36 @@ AFFECT /qml/common/SceneSelectionHandler.qml
             property string listName: "No list"
             property string picking: ""
 
+            property bool reminderEnabled: false
+            property var reminderAt: new Date()
+            property var reminderWeekdays: []
+            property bool reminderPlaysSound: true
+            property bool reminderIsImportant: false
+            property string timeZone: "UTC"
+
+            property string repeatMode: "none"
+            property bool reminderNudging: false
+            property var calendarMonth: new Date()
+
+            readonly property int pageHeight: {
+                if (saverConfirm.picking === "date") return 780;
+                if (saverConfirm.picking === "reminder") {
+                    if (!saverConfirm.reminderEnabled) return 280;
+                    var height = 700;
+                    if (saverConfirm.reminderNudging) height += 88;
+                    if (saverConfirm.repeatMode === "weekly"
+                        || saverConfirm.repeatMode === "custom") height += 76;
+                    return height;
+                }
+                if (saverConfirm.picking.length > 0) return 760;
+                return 600;
+            }
+
             z: 300
             visible: false
             anchors.centerIn: parent
             width: Math.min(parent.width - 160, 820)
-            height: Math.min(parent.height - 160, 760)
+            height: Math.min(parent.height - 120, saverConfirm.pageHeight)
             color: "white"
             border.color: "black"
             border.width: 3
@@ -478,11 +565,168 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                 return (space && space.lists) ? space.lists : [];
             }
 
+            function defaultReminder() {
+                var next = new Date(Date.now() + 60 * 60 * 1000);
+                next.setMinutes(0);
+                next.setSeconds(0);
+                next.setMilliseconds(0);
+                return next;
+            }
+
+            function toggleReminder() {
+                saverConfirm.reminderEnabled = !saverConfirm.reminderEnabled;
+                if (saverConfirm.reminderEnabled
+                    && saverConfirm.reminderAt <= new Date()) {
+                    saverConfirm.reminderAt = saverConfirm.defaultReminder();
+                }
+            }
+
+            function shiftReminderMinutes(minutes) {
+                saverConfirm.reminderAt =
+                    new Date(saverConfirm.reminderAt.getTime() + minutes * 60 * 1000);
+            }
+
+            function startOfDay(date) {
+                return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+            }
+
+            function daysFromToday(days) {
+                var date = new Date();
+                date.setDate(date.getDate() + days);
+                return date;
+            }
+
+            function setReminderDate(date) {
+                saverConfirm.reminderAt =
+                    new Date(date.getFullYear(), date.getMonth(), date.getDate(),
+                             saverConfirm.reminderAt.getHours(),
+                             saverConfirm.reminderAt.getMinutes(), 0, 0);
+            }
+
+            function setReminderTime(hours, minutes) {
+                var next = new Date(saverConfirm.reminderAt.getTime());
+                next.setHours(hours, minutes, 0, 0);
+                saverConfirm.reminderAt = next;
+            }
+
+            function dateIsDaysAway(days) {
+                return saverConfirm.startOfDay(saverConfirm.reminderAt).getTime()
+                    === saverConfirm.startOfDay(saverConfirm.daysFromToday(days)).getTime();
+            }
+
+            function timeIs(hours, minutes) {
+                return saverConfirm.reminderAt.getHours() === hours
+                    && saverConfirm.reminderAt.getMinutes() === minutes;
+            }
+
+            function applyRepeatMode(mode) {
+                saverConfirm.repeatMode = mode;
+                if (mode === "none") {
+                    saverConfirm.reminderWeekdays = [];
+                } else if (mode === "daily") {
+                    saverConfirm.reminderWeekdays = [1, 2, 3, 4, 5, 6, 7];
+                } else if (mode === "weekly") {
+                    saverConfirm.reminderWeekdays = [saverConfirm.reminderAt.getDay() + 1];
+                }
+            }
+
+            function repeatModeFor(weekdays) {
+                if (!weekdays || weekdays.length === 0) return "none";
+                if (weekdays.length === 7) return "daily";
+                if (weekdays.length === 1) return "weekly";
+                return "custom";
+            }
+
+            function calendarCells() {
+                var year = saverConfirm.calendarMonth.getFullYear();
+                var month = saverConfirm.calendarMonth.getMonth();
+                var lead = (new Date(year, month, 1).getDay() + 6) % 7;
+                var count = new Date(year, month + 1, 0).getDate();
+                var cells = [];
+                for (var i = 0; i < lead; i++) cells.push(0);
+                for (var day = 1; day <= count; day++) cells.push(day);
+                while (cells.length % 7 !== 0) cells.push(0);
+                return cells;
+            }
+
+            function shiftCalendarMonth(months) {
+                saverConfirm.calendarMonth =
+                    new Date(saverConfirm.calendarMonth.getFullYear(),
+                             saverConfirm.calendarMonth.getMonth() + months, 1);
+            }
+
+            function calendarDaySelected(day) {
+                return day > 0
+                    && saverConfirm.reminderAt.getDate() === day
+                    && saverConfirm.reminderAt.getMonth()
+                       === saverConfirm.calendarMonth.getMonth()
+                    && saverConfirm.reminderAt.getFullYear()
+                       === saverConfirm.calendarMonth.getFullYear();
+            }
+
+            function openCalendar() {
+                saverConfirm.calendarMonth =
+                    new Date(saverConfirm.reminderAt.getFullYear(),
+                             saverConfirm.reminderAt.getMonth(), 1);
+                saverConfirm.picking = "date";
+            }
+
+            function pickCalendarDay(day) {
+                if (day <= 0) return;
+                saverConfirm.setReminderDate(
+                    new Date(saverConfirm.calendarMonth.getFullYear(),
+                             saverConfirm.calendarMonth.getMonth(), day));
+                saverConfirm.picking = "reminder";
+            }
+
+            function toggleReminderWeekday(weekday) {
+                var next = saverConfirm.reminderWeekdays.slice(0);
+                var index = next.indexOf(weekday);
+                if (index >= 0) {
+                    next.splice(index, 1);
+                } else {
+                    next.push(weekday);
+                }
+                next.sort(function (a, b) { return a - b; });
+                saverConfirm.reminderWeekdays = next;
+            }
+
+            function reminderPayload() {
+                return {
+                    scheduledAt: saverConfirm.reminderAt.toISOString(),
+                    repeatWeekdays: saverConfirm.reminderWeekdays,
+                    timeZone: saverConfirm.timeZone,
+                    playsSound: saverConfirm.reminderPlaysSound,
+                    isImportant: saverConfirm.reminderIsImportant,
+                };
+            }
+
+            function reminderSummary() {
+                if (!saverConfirm.reminderEnabled) {
+                    return "Reminder: Off";
+                }
+                var when = Qt.formatDate(saverConfirm.reminderAt, "ddd d MMM")
+                    + ", " + Qt.formatTime(saverConfirm.reminderAt, "hh:mm");
+                if (saverConfirm.reminderWeekdays.length > 0) {
+                    when += ", repeats";
+                }
+                return "Reminder: " + when;
+            }
+
             function openFor(initialText, spaceList, activeSpaceId,
-                             defaultSpaceId, defaultListId) {
+                             defaultSpaceId, defaultListId, timeZone) {
                 saverConfirm.text = initialText;
                 saverConfirm.spaces = spaceList;
                 saverConfirm.picking = "";
+
+                saverConfirm.timeZone = timeZone || "UTC";
+                saverConfirm.reminderEnabled = false;
+                saverConfirm.reminderAt = saverConfirm.defaultReminder();
+                saverConfirm.reminderWeekdays = [];
+                saverConfirm.reminderPlaysSound = true;
+                saverConfirm.reminderIsImportant = false;
+                saverConfirm.repeatMode = "none";
+                saverConfirm.reminderNudging = false;
 
                 var target = saverSend.resolveTarget(spaceList, activeSpaceId,
                                                      defaultSpaceId, defaultListId);
@@ -521,7 +765,9 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                 }
                 saverConfirm.visible = false;
                 saverToast.show("Saving " + saverToast.shorten(finalText) + "...", true);
-                saverSend.postTodo(finalText, saverConfirm.spaceId, saverConfirm.listId);
+                saverSend.postTodo(finalText, saverConfirm.spaceId, saverConfirm.listId,
+                                   saverConfirm.reminderEnabled
+                                       ? saverConfirm.reminderPayload() : null);
             }
 
             Column {
@@ -619,6 +865,30 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                     }
                 }
 
+                Rectangle {
+                    width: parent.width
+                    height: 64
+                    color: "white"
+                    border.color: "black"
+                    border.width: saverConfirm.reminderEnabled ? 3 : 2
+                    radius: 6
+
+                    Text {
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        text: saverConfirm.reminderSummary()
+                        font.pixelSize: 24
+                        color: "black"
+                        elide: Text.ElideRight
+                        verticalAlignment: Text.AlignVCenter
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: saverConfirm.picking = "reminder"
+                    }
+                }
+
                 Row {
                     width: parent.width
                     spacing: 16
@@ -675,7 +945,8 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                 anchors.fill: parent
                 anchors.margins: 24
                 spacing: 16
-                visible: saverConfirm.picking.length > 0
+                visible: saverConfirm.picking === "space"
+                         || saverConfirm.picking === "list"
 
                 Text {
                     text: saverConfirm.picking === "space" ? "Choose a space" : "Choose a list"
@@ -752,6 +1023,587 @@ AFFECT /qml/common/SceneSelectionHandler.qml
                     MouseArea {
                         anchors.fill: parent
                         onClicked: saverConfirm.picking = ""
+                    }
+                }
+            }
+
+            Column {
+                id: saverReminderPage
+
+                anchors.fill: parent
+                anchors.margins: 24
+                spacing: 16
+                visible: saverConfirm.picking === "reminder"
+
+                Row {
+                    width: parent.width
+                    height: 68
+                    spacing: 16
+
+                    Column {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width - 176
+                        spacing: 4
+
+                        Text {
+                            text: "Reminder on your phone"
+                            font.pixelSize: 30
+                            font.bold: true
+                            color: "black"
+                        }
+
+                        Text {
+                            width: parent.width
+                            text: "Saver sends this to your signed-in phone."
+                            font.pixelSize: 22
+                            color: "black"
+                            opacity: 0.6
+                            elide: Text.ElideRight
+                        }
+                    }
+
+                    Rectangle {
+                        width: 160
+                        height: 68
+                        color: saverConfirm.reminderEnabled ? "black" : "white"
+                        border.color: "black"
+                        border.width: 2
+                        radius: 6
+                        antialiasing: false
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: saverConfirm.reminderEnabled ? "On" : "Off"
+                            font.pixelSize: 28
+                            color: saverConfirm.reminderEnabled ? "white" : "black"
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: saverConfirm.toggleReminder()
+                        }
+                    }
+                }
+
+                Text {
+                    width: parent.width
+                    text: "Turn this on to pick a date and time."
+                    font.pixelSize: 24
+                    color: "black"
+                    opacity: 0.6
+                    visible: !saverConfirm.reminderEnabled
+                    elide: Text.ElideRight
+                }
+
+                Row {
+                    width: parent.width
+                    height: 36
+                    visible: saverConfirm.reminderEnabled
+
+                    Text {
+                        width: 120
+                        height: 36
+                        text: "DATE"
+                        font.pixelSize: 24
+                        color: "black"
+                        verticalAlignment: Text.AlignVCenter
+                    }
+
+                    Text {
+                        width: saverReminderPage.width - 120
+                        height: 36
+                        text: Qt.formatDate(saverConfirm.reminderAt, "ddd d MMM yyyy")
+                        font.pixelSize: 27
+                        font.bold: true
+                        color: "black"
+                        elide: Text.ElideRight
+                        horizontalAlignment: Text.AlignRight
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                }
+
+                Row {
+                    width: parent.width
+                    height: 72
+                    spacing: 12
+                    visible: saverConfirm.reminderEnabled
+
+                    Repeater {
+                        model: [
+                            { label: "Today", days: 0 },
+                            { label: "Tomorrow", days: 1 },
+                            { label: "In 1 week", days: 7 },
+                            { label: "Pick date...", days: -1 },
+                        ]
+
+                        delegate: Rectangle {
+                            property bool selected: modelData.days >= 0
+                                                    && saverConfirm.dateIsDaysAway(modelData.days)
+
+                            width: (saverReminderPage.width - 36) / 4
+                            height: 72
+                            color: "white"
+                            border.color: "black"
+                            border.width: selected ? 5 : 2
+                            radius: 8
+                            antialiasing: false
+
+                            Text {
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                text: modelData.label
+                                font.pixelSize: 24
+                                font.bold: parent.selected
+                                color: "black"
+                                elide: Text.ElideRight
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: {
+                                    if (modelData.days < 0) {
+                                        saverConfirm.openCalendar();
+                                    } else {
+                                        saverConfirm.setReminderDate(
+                                            saverConfirm.daysFromToday(modelData.days));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Row {
+                    width: parent.width
+                    height: 40
+                    visible: saverConfirm.reminderEnabled
+
+                    Text {
+                        width: 120
+                        height: 40
+                        text: "TIME"
+                        font.pixelSize: 24
+                        color: "black"
+                        verticalAlignment: Text.AlignVCenter
+                    }
+
+                    Text {
+                        width: saverReminderPage.width - 120
+                        height: 40
+                        text: Qt.formatTime(saverConfirm.reminderAt, "hh:mm")
+                        font.pixelSize: 32
+                        font.bold: true
+                        color: "black"
+                        horizontalAlignment: Text.AlignRight
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                }
+
+                Row {
+                    width: parent.width
+                    height: 72
+                    spacing: 12
+                    visible: saverConfirm.reminderEnabled
+
+                    Repeater {
+                        model: [
+                            { label: "Morning", hour: 8, minute: 0 },
+                            { label: "12:00", hour: 12, minute: 0 },
+                            { label: "18:00", hour: 18, minute: 0 },
+                            { label: "Pick time...", hour: -1, minute: 0 },
+                        ]
+
+                        delegate: Rectangle {
+                            property bool selected: modelData.hour < 0
+                                ? saverConfirm.reminderNudging
+                                : saverConfirm.timeIs(modelData.hour, modelData.minute)
+
+                            width: (saverReminderPage.width - 36) / 4
+                            height: 72
+                            color: "white"
+                            border.color: "black"
+                            border.width: selected ? 5 : 2
+                            radius: 8
+                            antialiasing: false
+
+                            Text {
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                text: modelData.label
+                                font.pixelSize: 24
+                                font.bold: parent.selected
+                                color: "black"
+                                elide: Text.ElideRight
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: {
+                                    if (modelData.hour < 0) {
+                                        saverConfirm.reminderNudging =
+                                            !saverConfirm.reminderNudging;
+                                    } else {
+                                        saverConfirm.setReminderTime(modelData.hour,
+                                                                     modelData.minute);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Row {
+                    width: parent.width
+                    height: 72
+                    spacing: 12
+                    visible: saverConfirm.reminderEnabled && saverConfirm.reminderNudging
+
+                    Repeater {
+                        model: [
+                            { label: "-1h", minutes: -60 },
+                            { label: "-15m", minutes: -15 },
+                            { label: "+15m", minutes: 15 },
+                            { label: "+1h", minutes: 60 },
+                        ]
+
+                        delegate: Rectangle {
+                            width: (saverReminderPage.width - 36) / 4
+                            height: 72
+                            color: "white"
+                            border.color: "black"
+                            border.width: 2
+                            radius: 8
+                            antialiasing: false
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: modelData.label
+                                font.pixelSize: 24
+                                color: "black"
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: saverConfirm.shiftReminderMinutes(modelData.minutes)
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    text: "REPEAT"
+                    font.pixelSize: 24
+                    color: "black"
+                    visible: saverConfirm.reminderEnabled
+                }
+
+                Row {
+                    width: parent.width
+                    height: 72
+                    spacing: 12
+                    visible: saverConfirm.reminderEnabled
+
+                    Repeater {
+                        model: [
+                            { label: "None", mode: "none" },
+                            { label: "Daily", mode: "daily" },
+                            { label: "Weekly", mode: "weekly" },
+                            { label: "Custom...", mode: "custom" },
+                        ]
+
+                        delegate: Rectangle {
+                            property bool selected: saverConfirm.repeatMode === modelData.mode
+
+                            width: (saverReminderPage.width - 36) / 4
+                            height: 72
+                            color: "white"
+                            border.color: "black"
+                            border.width: selected ? 5 : 2
+                            radius: 8
+                            antialiasing: false
+
+                            Text {
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                text: modelData.label
+                                font.pixelSize: 24
+                                font.bold: parent.selected
+                                color: "black"
+                                elide: Text.ElideRight
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: saverConfirm.applyRepeatMode(modelData.mode)
+                            }
+                        }
+                    }
+                }
+
+                Row {
+                    width: parent.width
+                    height: 60
+                    spacing: 10
+                    visible: saverConfirm.reminderEnabled
+                             && (saverConfirm.repeatMode === "weekly"
+                                 || saverConfirm.repeatMode === "custom")
+
+                    Repeater {
+                        model: ["S", "M", "T", "W", "T", "F", "S"]
+
+                        delegate: Rectangle {
+                            width: (saverReminderPage.width - 60) / 7
+                            height: 60
+                            color: saverConfirm.reminderWeekdays.indexOf(index + 1) >= 0
+                                   ? "black" : "white"
+                            border.color: "black"
+                            border.width: 2
+                            radius: 6
+                            antialiasing: false
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: modelData
+                                font.pixelSize: 26
+                                color: saverConfirm.reminderWeekdays.indexOf(index + 1) >= 0
+                                       ? "white" : "black"
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: {
+                                    saverConfirm.toggleReminderWeekday(index + 1);
+                                    saverConfirm.repeatMode = saverConfirm.repeatModeFor(
+                                        saverConfirm.reminderWeekdays);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Row {
+                    width: parent.width
+                    height: 60
+                    spacing: 16
+                    visible: saverConfirm.reminderEnabled
+
+                    Rectangle {
+                        width: (saverReminderPage.width - 16) / 2
+                        height: 60
+                        color: saverConfirm.reminderPlaysSound ? "black" : "white"
+                        border.color: "black"
+                        border.width: 2
+                        radius: 6
+                        antialiasing: false
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: saverConfirm.reminderPlaysSound ? "Sound on" : "Silent"
+                            font.pixelSize: 24
+                            color: saverConfirm.reminderPlaysSound ? "white" : "black"
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: saverConfirm.reminderPlaysSound =
+                                       !saverConfirm.reminderPlaysSound
+                        }
+                    }
+
+                    Rectangle {
+                        width: (saverReminderPage.width - 16) / 2
+                        height: 60
+                        color: saverConfirm.reminderIsImportant ? "black" : "white"
+                        border.color: "black"
+                        border.width: 2
+                        radius: 6
+                        antialiasing: false
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "Time-sensitive"
+                            font.pixelSize: 24
+                            color: saverConfirm.reminderIsImportant ? "white" : "black"
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: saverConfirm.reminderIsImportant =
+                                       !saverConfirm.reminderIsImportant
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: parent.width
+                    height: 76
+                    color: "white"
+                    border.color: "black"
+                    border.width: 2
+                    radius: 8
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "Back"
+                        font.pixelSize: 28
+                        color: "black"
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: saverConfirm.picking = ""
+                    }
+                }
+            }
+
+            Column {
+                id: saverCalendarPage
+
+                anchors.fill: parent
+                anchors.margins: 24
+                spacing: 12
+                visible: saverConfirm.picking === "date"
+
+                Row {
+                    width: parent.width
+                    height: 64
+                    spacing: 12
+
+                    Rectangle {
+                        width: 88
+                        height: 64
+                        color: "white"
+                        border.color: "black"
+                        border.width: 2
+                        radius: 8
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "\u2039"
+                            font.pixelSize: 40
+                            color: "black"
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: saverConfirm.shiftCalendarMonth(-1)
+                        }
+                    }
+
+                    Text {
+                        width: saverCalendarPage.width - 200
+                        height: 64
+                        text: Qt.formatDate(saverConfirm.calendarMonth, "MMMM yyyy")
+                        font.pixelSize: 30
+                        font.bold: true
+                        color: "black"
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+
+                    Rectangle {
+                        width: 88
+                        height: 64
+                        color: "white"
+                        border.color: "black"
+                        border.width: 2
+                        radius: 8
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "\u203a"
+                            font.pixelSize: 40
+                            color: "black"
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: saverConfirm.shiftCalendarMonth(1)
+                        }
+                    }
+                }
+
+                Row {
+                    width: parent.width
+                    height: 30
+                    spacing: 8
+
+                    Repeater {
+                        model: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+                        delegate: Text {
+                            width: (saverCalendarPage.width - 48) / 7
+                            height: 30
+                            text: modelData
+                            font.pixelSize: 22
+                            color: "black"
+                            opacity: 0.6
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                    }
+                }
+
+                Grid {
+                    width: parent.width
+                    columns: 7
+                    spacing: 8
+
+                    Repeater {
+                        model: saverConfirm.calendarCells()
+
+                        delegate: Rectangle {
+                            property bool selected: saverConfirm.calendarDaySelected(modelData)
+
+                            width: (saverCalendarPage.width - 48) / 7
+                            height: 72
+                            color: "white"
+                            border.color: modelData > 0 ? "black" : "transparent"
+                            border.width: selected ? 5 : 2
+                            radius: 8
+                            antialiasing: false
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: modelData > 0 ? modelData : ""
+                                font.pixelSize: 26
+                                font.bold: parent.selected
+                                color: "black"
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: modelData > 0
+                                onClicked: saverConfirm.pickCalendarDay(modelData)
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: parent.width
+                    height: 72
+                    color: "white"
+                    border.color: "black"
+                    border.width: 2
+                    radius: 8
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "Back"
+                        font.pixelSize: 28
+                        color: "black"
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: saverConfirm.picking = "reminder"
                     }
                 }
             }
