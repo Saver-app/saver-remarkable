@@ -34,11 +34,14 @@ Item {
     property string notebookDefaultSpaceName: ""
     property string notebookDefaultListId: ""
     property string notebookDefaultListName: ""
+    property string timeZone: "UTC"
 
     property bool configLoaded: false
     property bool busy: false
     property bool linking: false
     property string lastError: ""
+
+    property string pendingError: ""
 
     function refreshTodos() {
         root.busy = true
@@ -110,6 +113,7 @@ Item {
                 root.notebookDefaultListId = cfg.notebookDefaultListId || ""
                 root.notebookDefaultListName = cfg.notebookDefaultListName || ""
                 root.showInSidebar = cfg.showInSidebar !== false
+                root.timeZone = cfg.timeZone || "UTC"
                 if (cfg.hasToken) {
                     root.refreshTodos()
                 } else {
@@ -121,7 +125,8 @@ Item {
                 if (listRes.error) {
                     root.lastError = listRes.error
                 } else {
-                    root.lastError = ""
+                    root.lastError = root.pendingError
+                    root.pendingError = ""
                     itemsPage.setSpaces(listRes.spaces || [],
                                         listRes.activeSpaceId || "")
                 }
@@ -134,10 +139,11 @@ Item {
             } else if (type === 1104 || type === 1110 || type === 1111
                        || type === 1112 || type === 1113 || type === 1114) {
                 var createRes = JSON.parse(contents)
-                if (createRes.error) {
+                if (createRes.error && !createRes.id) {
                     root.busy = false
                     root.lastError = createRes.error
                 } else {
+                    root.pendingError = createRes.error || ""
                     root.refreshTodos()
                 }
             } else if (type === 1106) {
@@ -255,6 +261,7 @@ Item {
         notebookDefaultListId: root.notebookDefaultListId
         notebookDefaultListName: root.notebookDefaultListName
         showInSidebar: root.showInSidebar
+        timeZone: root.timeZone
         onToggleTodo: (spaceId, todoId, isDone) => {
             endpoint.sendMessage(1005, JSON.stringify({
                 spaceId: spaceId,
@@ -324,16 +331,17 @@ Item {
             }))
         }
         onCloseApp: root.closeApp()
-        onCreateTodo: (spaceId, text, parentId, isList) => {
+        onCreateTodo: (spaceId, text, parentId, isList, reminder) => {
             root.busy = true
             endpoint.sendMessage(1004, JSON.stringify({
                 spaceId: spaceId,
                 text: text,
                 parentId: parentId,
                 isList: isList,
+                reminder: reminder,
             }))
         }
-        onCreateBookmark: (spaceId, title, url, isList, parentId) => {
+        onCreateBookmark: (spaceId, title, url, isList, parentId, reminder) => {
             root.busy = true
             endpoint.sendMessage(1010, JSON.stringify({
                 spaceId: spaceId,
@@ -341,6 +349,7 @@ Item {
                 url: url,
                 isList: isList,
                 parentId: parentId,
+                reminder: reminder,
             }))
         }
         onCreateHabit: (spaceId, name, requirement) => {
@@ -350,15 +359,18 @@ Item {
                 name: name,
             }, requirement)))
         }
-        onUpdateTodo: (spaceId, todoId, text) => {
+        onUpdateTodo: (spaceId, todoId, text, reminder, removeReminder) => {
             root.busy = true
             endpoint.sendMessage(1013, JSON.stringify({
                 spaceId: spaceId,
                 todoId: todoId,
                 text: text,
+                reminder: reminder,
+                removeReminder: removeReminder,
             }))
         }
-        onUpdateBookmark: (spaceId, bookmarkId, title, url, isList) => {
+        onUpdateBookmark: (spaceId, bookmarkId, title, url, isList,
+                           reminder, removeReminder) => {
             root.busy = true
             endpoint.sendMessage(1014, JSON.stringify({
                 spaceId: spaceId,
@@ -366,6 +378,8 @@ Item {
                 title: title,
                 url: url,
                 isList: isList,
+                reminder: reminder,
+                removeReminder: removeReminder,
             }))
         }
         onUpdateHabit: (spaceId, habitId, name, requirement) => {
