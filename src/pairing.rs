@@ -1,12 +1,9 @@
-use std::time::Duration;
-
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use qrcode::{Color, QrCode};
 use serde::Deserialize;
 use serde_json::json;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+use crate::http::{self, Retry};
 
 pub struct PairingClient {
     http: reqwest::blocking::Client,
@@ -51,61 +48,37 @@ struct PollResponse {
     token: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct ErrorResponse {
-    error: String,
-}
-
 impl PairingClient {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
-            http: reqwest::blocking::Client::builder()
-                .connect_timeout(CONNECT_TIMEOUT)
-                .timeout(REQUEST_TIMEOUT)
-                .build()
-                .expect("building the Saver pairing HTTP client"),
+            http: http::blocking_client(),
             url: url.into(),
         }
     }
 
-    fn call(&self, body: serde_json::Value) -> Result<serde_json::Value> {
-        let response = self
-            .http
-            .post(&self.url)
-            .json(&body)
-            .send()
-            .map_err(|err| {
-                if err.is_timeout() || err.is_connect() {
-                    anyhow::anyhow!("Could not reach Saver. Check your Wi-Fi and try again.")
-                } else {
-                    anyhow::anyhow!("Could not reach Saver: {err}")
-                }
-            })?;
-
-        let status = response.status();
-        let text = response.text().context("reading response body")?;
-
-        if !status.is_success() {
-            let message = serde_json::from_str::<ErrorResponse>(&text)
-                .map(|e| e.error)
-                .unwrap_or(text);
-            bail!("pairing failed ({status}): {message}");
-        }
-
-        serde_json::from_str(&text).context("parsing response body")
+    fn call(&self, body: serde_json::Value, retry: Retry) -> Result<serde_json::Value> {
+        http::send_json("pairing failed", retry, || {
+            self.http.post(&self.url).json(&body)
+        })
     }
 
     pub fn start(&self) -> Result<PairingStart> {
-        let value = self.call(json!({ "op": "start", "label": device_label() }))?;
+        let value = self.call(
+            json!({ "op": "start", "label": device_label() }),
+            Retry::OnColdStart,
+        )?;
         serde_json::from_value(value).context("parsing pairing start response")
     }
 
     pub fn poll(&self, user_code: &str, device_code: &str) -> Result<PairingStatus> {
-        let value = self.call(json!({
-            "op": "poll",
-            "userCode": user_code,
-            "deviceCode": device_code,
-        }))?;
+        let value = self.call(
+            json!({
+                "op": "poll",
+                "userCode": user_code,
+                "deviceCode": device_code,
+            }),
+            Retry::Never,
+        )?;
         let parsed: PollResponse =
             serde_json::from_value(value).context("parsing pairing poll response")?;
 
